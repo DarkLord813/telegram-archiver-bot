@@ -1,122 +1,209 @@
+#!/usr/bin/env python3
+# ============================================
+# TELEGRAM ARCHIVE BOT - WORKING VERSION
+# Compatible with python-telegram-bot 13.7
+# Uses GitHub for storage, force join channels
+# ============================================
+
 import os
 import sys
+import sqlite3
+import secrets
+import logging
+import re
+import shutil
 import zipfile
 import rarfile
 import py7zr
-import shutil
 import time
-import math
-import asyncio
 import base64
-import json
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import logging
+import asyncio
+import threading
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Bot
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Enable logging
+# ============================================
+# CONFIG
+# ============================================
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    print('❌ BOT_TOKEN is not set')
+    sys.exit(1)
+
+# GitHub Configuration
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+GITHUB_OWNER = os.getenv('GITHUB_OWNER')
+GITHUB_REPO = os.getenv('GITHUB_REPO')
+GITHUB_BRANCH = os.getenv('GITHUB_BRANCH', 'main')
+
+if not GITHUB_TOKEN or not GITHUB_OWNER or not GITHUB_REPO:
+    print('❌ GitHub credentials not set')
+    sys.exit(1)
+
+# Force Join Configuration
+FORCE_CHANNEL = os.getenv('FORCE_CHANNEL', '@NCK_Dev')
+FORCE_CHANNEL_ID = int(os.getenv('FORCE_CHANNEL_ID', '-1002583286874'))
+
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+TEMP_DIR = os.getenv('TEMP_DIR', 'temp_downloads')
+DB_PATH = os.getenv('DB_PATH', './data/bot_database.db')
+
+# Create directories
+os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+# Configure logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - All from environment variables with error checking
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN environment variable is required!")
-    sys.exit(1)
+# ============================================
+# DATABASE CLASS
+# ============================================
+class Database:
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+        self.conn = None
+        self.init_db()
 
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 2 * 1024 * 1024 * 1024))
-TEMP_DIR = os.getenv("TEMP_DIR", "temp_downloads")
+    def init_db(self):
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        cursor = self.conn.cursor()
 
-# GitHub Configuration
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-if not GITHUB_TOKEN:
-    logger.error("❌ GITHUB_TOKEN environment variable is required!")
-    sys.exit(1)
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                file_prefix TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
 
-GITHUB_OWNER = os.getenv("GITHUB_OWNER")
-if not GITHUB_OWNER:
-    logger.error("❌ GITHUB_OWNER environment variable is required!")
-    sys.exit(1)
+        # Files table (local references to GitHub files)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS files (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER,
+                name TEXT,
+                size INTEGER,
+                file_id TEXT,
+                github_path TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
 
-GITHUB_REPO = os.getenv("GITHUB_REPO")
-if not GITHUB_REPO:
-    logger.error("❌ GITHUB_REPO environment variable is required!")
-    sys.exit(1)
+        self.conn.commit()
+        logger.info('✅ Database initialized')
 
-GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+    def get_user(self, user_id: int) -> Optional[Dict]:
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
-# Force Join Configuration
-FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "@NCK_Dev")
-FORCE_CHANNEL_ID = int(os.getenv("FORCE_CHANNEL_ID", "-1002583286874"))
+    def create_user(self, user_id: int, username: str, first_name: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            '''INSERT OR IGNORE INTO users (user_id, username, first_name) 
+               VALUES (?, ?, ?)''',
+            (user_id, username or '', first_name)
+        )
+        self.conn.commit()
 
-# Create temp directory
-os.makedirs(TEMP_DIR, exist_ok=True)
+    def update_file_prefix(self, user_id: int, prefix: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'UPDATE users SET file_prefix = ? WHERE user_id = ?',
+            (prefix, user_id)
+        )
+        self.conn.commit()
 
-# User sessions storage
-user_data = {}
+    def get_file_prefix(self, user_id: int) -> str:
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT file_prefix FROM users WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+        return row['file_prefix'] if row else ''
 
-# Print startup info
-logger.info("🤖 Bot starting with GitHub storage integration...")
-logger.info(f"📁 GitHub: {GITHUB_OWNER}/{GITHUB_REPO}")
-logger.info(f"🌿 Branch: {GITHUB_BRANCH}")
+    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            '''INSERT INTO files (id, user_id, name, size, file_id, github_path) 
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (file_id, user_id, name, size, telegram_file_id, github_path)
+        )
+        self.conn.commit()
 
-class ProgressBar:
-    @staticmethod
-    def circular(percentage):
-        """Generate a circular progress bar with percentage"""
-        if percentage > 100:
-            percentage = 100
-        if percentage < 0:
-            percentage = 0
-            
-        segments = 12
-        filled = int((percentage / 100) * segments)
-        if filled > segments:
-            filled = segments
-            
-        filled_char = '●'
-        empty_char = '○'
-        
-        circle = ''
-        for i in range(segments):
-            if i < filled:
-                circle += filled_char
-            else:
-                circle += empty_char
-                
-        return f"┌{'─' * segments}┐\n│{circle}│ {percentage:.1f}%\n└{'─' * segments}┘"
+    def get_user_files(self, user_id: int) -> List[Dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT * FROM files WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC',
+            (user_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
+    def get_file(self, file_id: str) -> Optional[Dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT * FROM files WHERE id = ? AND is_active = 1',
+            (file_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def delete_file(self, file_id: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'UPDATE files SET is_active = 0 WHERE id = ?',
+            (file_id,)
+        )
+        self.conn.commit()
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
+
+# ============================================
+# GITHUB MANAGER
+# ============================================
 class GitHubManager:
-    def __init__(self, token, owner, repo, branch="main"):
+    def __init__(self, token: str, owner: str, repo: str, branch: str = 'main'):
         self.token = token
         self.owner = owner
         self.repo = repo
         self.branch = branch
-        self.repo_full = f"{owner}/{repo}"
         self.base_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
         self.headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json"
         }
 
-    async def upload_file(self, file_path, file_name, user_id):
-        """Upload a file to GitHub repository"""
+    def upload_file(self, file_path: str, file_name: str, user_id: int) -> tuple:
+        """Upload file to GitHub"""
         try:
             with open(file_path, 'rb') as f:
                 content = f.read()
             
-            encoded_content = base64.b64encode(content).decode('utf-8')
+            encoded = base64.b64encode(content).decode('utf-8')
             path = f"user_files/{user_id}/{file_name}"
             url = f"{self.base_url}/{path}"
-            sha = None
             
+            # Check if exists
+            sha = None
             try:
                 response = requests.get(url, headers=self.headers)
                 if response.status_code == 200:
@@ -126,7 +213,7 @@ class GitHubManager:
             
             data = {
                 "message": f"Upload {file_name} by user {user_id}",
-                "content": encoded_content,
+                "content": encoded,
                 "branch": self.branch
             }
             if sha:
@@ -142,8 +229,8 @@ class GitHubManager:
         except Exception as e:
             return False, str(e)
 
-    async def delete_file(self, file_name, user_id):
-        """Delete a file from GitHub repository"""
+    def delete_file(self, file_name: str, user_id: int) -> tuple:
+        """Delete file from GitHub"""
         try:
             path = f"user_files/{user_id}/{file_name}"
             url = f"{self.base_url}/{path}"
@@ -163,545 +250,730 @@ class GitHubManager:
             response = requests.delete(url, headers=self.headers, json=data)
             
             if response.status_code in [200, 204]:
-                return True, "File deleted successfully"
+                return True, "File deleted"
             else:
                 return False, f"Delete failed: {response.text}"
                 
         except Exception as e:
             return False, str(e)
 
-    async def list_user_files(self, user_id):
-        """List all files for a user"""
+    def download_file(self, file_name: str, user_id: int, save_path: str) -> bool:
+        """Download file from GitHub"""
         try:
-            path = f"user_files/{user_id}/"
-            url = f"{self.base_url}/{path}"
+            url = f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/user_files/{user_id}/{file_name}"
+            response = requests.get(url)
             
-            response = requests.get(url, headers=self.headers)
             if response.status_code == 200:
-                files = response.json()
-                return [f.get('name') for f in files if f.get('type') == 'file']
-            else:
-                return []
-        except:
-            return []
-
-class ArchiveBot:
-    def __init__(self):
-        self.application = None
-        self.github = GitHubManager(GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
-        logger.info("✅ Bot initialized successfully!")
-
-    async def delete_previous_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Delete previous messages from user to keep chat clean"""
-        user_id = update.effective_user.id
-        
-        if user_id in user_data and 'message_ids' in user_data[user_id]:
-            for msg_id in user_data[user_id]['message_ids']:
-                try:
-                    await context.bot.delete_message(
-                        chat_id=update.effective_chat.id,
-                        message_id=msg_id
-                    )
-                except:
-                    pass
-            user_data[user_id]['message_ids'] = []
-
-    async def save_message_id(self, update: Update, message):
-        """Save message ID for later deletion"""
-        user_id = update.effective_user.id
-        
-        if user_id not in user_data:
-            user_data[user_id] = {}
-        if 'message_ids' not in user_data[user_id]:
-            user_data[user_id]['message_ids'] = []
-            
-        user_data[user_id]['message_ids'].append(message.message_id)
-
-    async def check_force_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check if user has joined the force channel"""
-        user_id = update.effective_user.id
-        
-        try:
-            member = await context.bot.get_chat_member(
-                chat_id=FORCE_CHANNEL_ID,
-                user_id=user_id
-            )
-            
-            if member.status in ['member', 'administrator', 'creator']:
+                with open(save_path, 'wb') as f:
+                    f.write(response.content)
                 return True
             else:
                 return False
-                
-        except Exception as e:
+        except:
             return False
 
-    async def send_or_edit_message(self, update, context, text, reply_markup=None, parse_mode='HTML'):
-        """Safely send or edit a message"""
-        try:
-            if update.callback_query:
-                msg = await update.callback_query.edit_message_text(
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode=parse_mode
-                )
-            else:
-                msg = await update.message.reply_text(
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode=parse_mode
-                )
-            await self.save_message_id(update, msg)
-            return msg
-        except Exception as e:
-            if "Message to edit not found" in str(e) or "message is not modified" in str(e):
-                if update.callback_query:
-                    msg = await update.callback_query.message.reply_text(
-                        text,
-                        reply_markup=reply_markup,
-                        parse_mode=parse_mode
-                    )
-                else:
-                    msg = await update.message.reply_text(
-                        text,
-                        reply_markup=reply_markup,
-                        parse_mode=parse_mode
-                    )
-                await self.save_message_id(update, msg)
-                return msg
-            else:
-                raise e
 
-    async def force_join_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Send force join message - blocks all access"""
-        await self.delete_previous_messages(update, context)
+# ============================================
+# PROGRESS BAR
+# ============================================
+class ProgressBar:
+    @staticmethod
+    def circular(percentage: float) -> str:
+        if percentage > 100:
+            percentage = 100
+        if percentage < 0:
+            percentage = 0
+            
+        segments = 12
+        filled = int((percentage / 100) * segments)
+        if filled > segments:
+            filled = segments
+            
+        filled_char = '●'
+        empty_char = '○'
         
-        keyboard = [
+        circle = ''.join(filled_char if i < filled else empty_char for i in range(segments))
+        return f"┌{'─' * segments}┐\n│{circle}│ {percentage:.1f}%\n└{'─' * segments}┘"
+
+
+# ============================================
+# BOT HANDLERS
+# ============================================
+class ArchiveBot:
+    def __init__(self):
+        self.db = Database()
+        self.github = GitHubManager(GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
+        self.bot_username = ''
+        self.bot_id = 0
+        self.user_sessions = {}
+
+    def format_size(self, bytes: int) -> str:
+        if bytes < 1024:
+            return f'{bytes} B'
+        if bytes < 1048576:
+            return f'{bytes / 1024:.1f} KB'
+        if bytes < 1073741824:
+            return f'{bytes / 1048576:.1f} MB'
+        return f'{bytes / 1073741824:.2f} GB'
+
+    def check_force_join(self, context: CallbackContext, user_id: int) -> bool:
+        """Check if user has joined force channel"""
+        try:
+            member = context.bot.get_chat_member(FORCE_CHANNEL_ID, user_id)
+            return member.status in ['member', 'administrator', 'creator']
+        except:
+            return False
+
+    def get_force_join_keyboard(self):
+        return InlineKeyboardMarkup([
             [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_CHANNEL.replace('@', '')}")],
             [InlineKeyboardButton("🔄 Check Again", callback_data="check_join")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        message = (
-            f"🔒 <b>Access Denied</b>\n\n"
-            f"You must join our channel to use this bot!\n\n"
-            f"📢 <b>Channel:</b> {FORCE_CHANNEL}\n\n"
-            f"<i>Click the button below to join, then click 'Check Again'</i>\n\n"
-            f"⚠️ <b>Note:</b> You cannot access any bot features until you join."
-        )
-        
-        await self.send_or_edit_message(update, context, message, reply_markup)
+        ])
 
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command with force join check"""
-        await self.delete_previous_messages(update, context)
-        
-        if not await self.check_force_join(update, context):
-            await self.force_join_message(update, context)
-            return
-            
-        user = update.effective_user
-        
-        keyboard = [
-            [InlineKeyboardButton("📤 Upload Files", callback_data="add_more")],
-            [InlineKeyboardButton("📋 My Files", callback_data="main_menu")],
-            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-            [InlineKeyboardButton("📖 How to Use", callback_data="help")],
-            [InlineKeyboardButton("ℹ️ About", callback_data="about")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        msg = await update.message.reply_text(
-            f"🌟 Welcome {user.first_name}!\n\n"
-            f"📤 <b>Upload files</b> or click <b>My Files</b> to manage\n\n"
-            f"🔒 <b>GitHub Storage:</b> Files are stored securely\n"
-            f"📁 <b>Custom Prefix:</b> Set your file naming format\n\n"
-            f"All actions are available through the menu system.",
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-        await self.save_message_id(update, msg)
-
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        
+    # ============================================
+    # START COMMAND
+    # ============================================
+    def start_command(self, update: Update, context: CallbackContext):
         user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        
+        # Check force join
+        if not self.check_force_join(context, user_id):
+            update.message.reply_text(
+                f"🔒 <b>Access Denied</b>\n\n"
+                f"You must join our channel to use this bot!\n\n"
+                f"📢 <b>Channel:</b> {FORCE_CHANNEL}\n\n"
+                f"<i>Click the button below to join, then click 'Check Again'</i>",
+                reply_markup=self.get_force_join_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Create user
+        user = update.effective_user
+        self.db.create_user(user_id, user.username or '', user.first_name or 'User')
+        
+        # Get prefix
+        prefix = self.db.get_file_prefix(user_id)
+        
+        # Main menu
+        kb = [
+            [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
+            [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")]
+        ]
+        
+        update.message.reply_text(
+            f"🌟 <b>Welcome {user.first_name}!</b>\n\n"
+            f"📤 Upload files to GitHub storage\n"
+            f"📁 Files are stored securely\n"
+            f"📝 Prefix: {prefix if prefix else 'None'}\n\n"
+            f"Choose an option:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    # ============================================
+    # CALLBACK HANDLER
+    # ============================================
+    def callback_handler(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        query.answer()
+        
+        user_id = query.from_user.id
         data = query.data
         
-        if data != "check_join":
-            if not await self.check_force_join(update, context):
-                await self.force_join_message(update, context)
-                return
+        # Check force join
+        if data != "check_join" and not self.check_force_join(context, user_id):
+            query.edit_message_text(
+                f"🔒 <b>Access Denied</b>\n\n"
+                f"You must join our channel to use this bot!\n\n"
+                f"📢 <b>Channel:</b> {FORCE_CHANNEL}",
+                reply_markup=self.get_force_join_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+            return
         
         if data == "check_join":
-            await self.delete_previous_messages(update, context)
-            
-            if await self.check_force_join(update, context):
-                user = update.effective_user
-                keyboard = [
-                    [InlineKeyboardButton("📤 Upload Files", callback_data="add_more")],
-                    [InlineKeyboardButton("📋 My Files", callback_data="main_menu")],
+            if self.check_force_join(context, user_id):
+                user = query.from_user
+                kb = [
+                    [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
+                    [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
                     [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                    [InlineKeyboardButton("📖 How to Use", callback_data="help")],
-                    [InlineKeyboardButton("ℹ️ About", callback_data="about")]
+                    [InlineKeyboardButton("❓ Help", callback_data="help")]
                 ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await self.send_or_edit_message(
-                    update, context,
+                query.edit_message_text(
                     f"✅ <b>Success!</b> You've joined the channel!\n\n"
-                    f"🌟 Welcome {user.first_name}!\n\n"
-                    f"📤 <b>Upload files</b> or click <b>My Files</b> to manage",
-                    reply_markup
+                    f"🌟 Welcome {user.first_name}!",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode=ParseMode.HTML
                 )
             else:
-                await self.force_join_message(update, context)
+                query.edit_message_text(
+                    f"🔒 Still not joined. Please join {FORCE_CHANNEL}",
+                    reply_markup=self.get_force_join_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
             return
+        
+        # ---- HELP ----
+        if data == "help":
+            query.edit_message_text(
+                "❓ <b>Help</b>\n\n"
+                "📤 <b>Upload Files</b>: Send files to store on GitHub\n"
+                "📋 <b>My Files</b>: View and manage your files\n"
+                "⚙️ <b>Settings</b>: Set file prefix\n\n"
+                "<b>File Actions:</b>\n"
+                "📦 Extract: Unpack ZIP/RAR/7z\n"
+                "🗜️ Compress: Create ZIP/7z with levels\n"
+                "✏️ Rename: Rename files\n"
+                "🔒 Password: Protect archives\n"
+                "🖼️ Thumbnail: Set custom preview\n\n"
+                f"📢 Required Channel: {FORCE_CHANNEL}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ---- BACK TO MENU ----
+        if data == "back_to_menu":
+            prefix = self.db.get_file_prefix(user_id)
+            user = self.db.get_user(user_id)
+            name = user['first_name'] if user else 'User'
             
-        elif data == "settings":
-            await self.show_settings(update, context, user_id)
-            
-        elif data == "set_prefix":
-            await self.handle_set_prefix(update, context, user_id)
-            
-        elif data == "remove_prefix":
-            if user_id in user_data and 'file_prefix' in user_data[user_id]:
-                del user_data[user_id]['file_prefix']
-            await self.show_settings(update, context, user_id)
-            
-        elif data == "help":
-            await self.delete_previous_messages(update, context)
-            
-            help_text = """
-<b>📚 How to Use</b>
-
-1️⃣ <b>Upload Files</b>
-   • Click <b>Upload Files</b> or send files directly
-   • Files are stored securely on GitHub
-
-2️⃣ <b>Access Menu</b>
-   • Click <b>My Files</b> to see uploaded files
-   • All actions are available from there
-
-3️⃣ <b>Available Actions:</b>
-   • <b>📦 Extract</b> - Unpack archives (ZIP/RAR/7z)
-   • <b>🗜️ Compress</b> - Create archive with levels
-   • <b>✏️ Rename</b> - Rename any file
-   • <b>🔒 Set Password</b> - Protect archives
-   • <b>🖼️ Set Thumbnail</b> - Custom preview
-   • <b>📋 Get File ID</b> - Get Telegram file ID
-   • <b>⚙️ Settings</b> - Customize file naming
-
-4️⃣ <b>File Naming:</b>
-   • Set custom prefix for your files
-   • Format: PREFIX + ORIGINAL_NAME.extension
-
-<i>Max file size: 2GB per file</i>
-<i>Files are deleted from GitHub after processing</i>
-"""
-            keyboard = [
-                [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_main")],
-                [InlineKeyboardButton("🏠 Home", callback_data="home")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await self.send_or_edit_message(update, context, help_text, reply_markup)
-            
-        elif data == "about":
-            await self.delete_previous_messages(update, context)
-            
-            about_text = """
-<b>🤖 Advanced Archive Bot</b>
-
-✨ <b>Features:</b>
-• Upload & manage files
-• GitHub storage integration
-• Extract archives (ZIP/RAR/7z)
-• Compress with levels
-• Rename files (standalone)
-• Custom file prefix
-• Password protection
-• Custom thumbnails
-• Telegram File ID support
-• Force join channel
-
-⚡ <b>Version:</b> 4.0
-📝 <b>All controls via menu</b>
-🔒 <b>No commands needed</b>
-"""
-            keyboard = [
-                [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_main")],
-                [InlineKeyboardButton("🏠 Home", callback_data="home")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await self.send_or_edit_message(update, context, about_text, reply_markup)
-            
-        elif data == "home":
-            await self.delete_previous_messages(update, context)
-            
-            keyboard = [
-                [InlineKeyboardButton("📤 Upload Files", callback_data="add_more")],
-                [InlineKeyboardButton("📋 My Files", callback_data="main_menu")],
+            kb = [
+                [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
+                [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
                 [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                [InlineKeyboardButton("📖 How to Use", callback_data="help")],
-                [InlineKeyboardButton("ℹ️ About", callback_data="about")]
+                [InlineKeyboardButton("❓ Help", callback_data="help")]
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await self.send_or_edit_message(
-                update, context,
-                f"🏠 <b>Home</b>\n\n"
-                f"📤 Upload files or manage existing ones.\n"
-                f"🔒 Files are stored securely on GitHub.",
-                reply_markup
+            
+            query.edit_message_text(
+                f"🌟 <b>Welcome back {name}!</b>\n\n"
+                f"📝 Prefix: {prefix if prefix else 'None'}\n\n"
+                f"Choose an option:",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode=ParseMode.HTML
             )
-            
-        elif data == "back_to_main":
-            await self.show_main_options(update, context, user_id)
-            
-        elif data == "main_menu":
-            await self.show_main_options(update, context, user_id)
-            
-        elif data == "done_upload":
-            await self.show_main_options(update, context, user_id)
-            
-        elif data == "add_more":
-            await self.delete_previous_messages(update, context)
-            
-            if user_id in user_data:
-                user_data[user_id]['message_ids'] = []
-                
-            keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_main")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await self.send_or_edit_message(
-                update, context,
-                f"📤 <b>Upload Files</b>\n\n"
-                f"Send any files you want to process.\n"
-                f"Files will be stored on GitHub.\n\n"
-                f"After uploading, click <b>✅ Done</b> or <b>Back to Menu</b>.",
-                reply_markup
-            )
-            
-        elif data == "thumb_send":
-            await self.delete_previous_messages(update, context)
-            
-            keyboard = [
-                [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_main")],
-                [InlineKeyboardButton("🏠 Home", callback_data="home")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await self.send_or_edit_message(
-                update, context,
-                f"🖼️ <b>Upload Thumbnail Image</b>\n\n"
-                f"Please send a photo to use as thumbnail.\n\n"
-                f"📸 <b>Supported:</b> JPG, PNG, WEBP\n"
-                f"📏 <b>Recommended:</b> 320x320 pixels\n\n"
-                f"<i>Send the photo now, or click Back to cancel.</i>",
-                reply_markup
-            )
-            
-            if user_id not in user_data:
-                user_data[user_id] = {}
-            user_data[user_id]['awaiting_thumb'] = True
             return
+        
+        # ---- SETTINGS ----
+        if data == "settings":
+            prefix = self.db.get_file_prefix(user_id)
             
-        elif data == "thumb_remove":
-            if user_id in user_data and 'thumb' in user_data[user_id]:
-                if os.path.exists(user_data[user_id]['thumb']):
-                    os.remove(user_data[user_id]['thumb'])
-                del user_data[user_id]['thumb']
-                await self.show_main_options(update, context, user_id)
-            else:
-                keyboard = [
-                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_main")],
-                    [InlineKeyboardButton("🏠 Home", callback_data="home")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await self.send_or_edit_message(
-                    update, context,
-                    "❌ No thumbnail set to remove.",
-                    reply_markup
+            kb = [
+                [InlineKeyboardButton("📝 Set File Prefix", callback_data="set_prefix")],
+                [InlineKeyboardButton("🗑️ Remove Prefix", callback_data="remove_prefix")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+            ]
+            
+            query.edit_message_text(
+                f"⚙️ <b>Settings</b>\n\n"
+                f"📝 <b>Current Prefix:</b> {prefix if prefix else 'None'}\n\n"
+                f"Prefix format: PREFIX + ORIGINAL_NAME.extension",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ---- SET PREFIX ----
+        if data == "set_prefix":
+            self.user_sessions[user_id] = {'step': 'waiting_prefix'}
+            
+            query.edit_message_text(
+                "📝 <b>Set File Prefix</b>\n\n"
+                "Send your desired prefix in the chat.\n"
+                "Example: <code>MY_FILE_</code>\n\n"
+                "Send /cancel to cancel",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ---- REMOVE PREFIX ----
+        if data == "remove_prefix":
+            self.db.update_file_prefix(user_id, '')
+            
+            query.edit_message_text(
+                "✅ Prefix removed!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="settings")]
+                ])
+            )
+            return
+        
+        # ---- UPLOAD ----
+        if data == "upload":
+            self.user_sessions[user_id] = {'step': 'waiting_file'}
+            
+            query.edit_message_text(
+                "📤 <b>Upload Files</b>\n\n"
+                "Send any file(s) you want to store on GitHub.\n"
+                "You can send multiple files.\n\n"
+                "After uploading, click <b>✅ Done</b> to access the menu.\n\n"
+                "Send /cancel to cancel",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ---- MY FILES ----
+        if data == "my_files":
+            files = self.db.get_user_files(user_id)
+            
+            if not files:
+                query.edit_message_text(
+                    "📂 <b>My Files</b>\n\n"
+                    "No files uploaded yet.\n\n"
+                    "Upload a file to get started!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📤 Upload", callback_data="upload")],
+                        [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                    ]),
+                    parse_mode=ParseMode.HTML
                 )
-            return
-            
-        elif data == "set_thumb":
-            await self.delete_previous_messages(update, context)
-            
-            keyboard = [
-                [InlineKeyboardButton("📸 Send Image", callback_data="thumb_send")],
-                [InlineKeyboardButton("🗑️ Remove Thumbnail", callback_data="thumb_remove")],
-                [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_main")],
-                [InlineKeyboardButton("🏠 Home", callback_data="home")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await self.send_or_edit_message(
-                update, context,
-                f"🖼️ <b>Custom Thumbnail</b>\n\n"
-                f"Set a custom thumbnail for your files.\n"
-                f"Click 'Send Image' and upload a photo.",
-                reply_markup
-            )
-            
-        elif data in ["extract", "compress", "add_password", "rename", "get_fileid", "clear_files", "cancel"]:
-            if user_id not in user_data:
-                await self.send_or_edit_message(update, context, "❌ Session expired. Please upload files again.")
                 return
-                
-            if data == "extract":
-                await self.extract_archives(update, context, user_id)
-            elif data == "compress":
-                await self.show_compress_options(update, context, user_id)
-            elif data == "add_password":
-                await self.handle_password(update, context, user_id)
-            elif data == "rename":
-                await self.handle_rename(update, context, user_id)
-            elif data == "get_fileid":
-                await self.show_fileid(update, context, user_id)
-            elif data == "clear_files":
-                await self.clear_files(update, context, user_id)
-            elif data == "cancel":
-                await self.delete_previous_messages(update, context)
-                if user_id in user_data:
-                    del user_data[user_id]
-                await self.send_or_edit_message(update, context, "❌ Operation cancelled.")
-                    
-        elif data.startswith("compress_"):
-            format_type = data.replace("compress_", "")
-            await self.show_compression_level(update, context, user_id, format_type)
             
-        elif data.startswith("level_"):
-            parts = data.split("_")
-            format_type = parts[1]
-            level = parts[2]
-            await self.start_compression(update, context, user_id, format_type, level)
+            text = f"📂 <b>My Files</b> ({len(files)})\n\n"
+            btns = []
             
-        elif data.startswith("password_"):
-            action = data.replace("password_", "")
-            if action == "set":
-                await self.delete_previous_messages(update, context)
-                await self.send_or_edit_message(
-                    update, context,
-                    "🔑 <b>Enter your password</b>\n\n"
-                    "Type your password in the chat below.\n"
-                    "<i>Send the password message now.</i>\n\n"
-                    "After sending, click the button below to continue.",
-                    None
-                )
-                if user_id not in user_data:
-                    user_data[user_id] = {}
-                user_data[user_id]['awaiting_password'] = True
-            elif action == "skip":
-                if user_id in user_data and 'password' in user_data[user_id]:
-                    del user_data[user_id]['password']
-                await self.delete_previous_messages(update, context)
-                await self.show_compress_options(update, context, user_id)
-
-    async def handle_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle file upload - adds to user's file list"""
-        if not await self.check_force_join(update, context):
-            await self.force_join_message(update, context)
-            return
+            for f in files[:10]:
+                text += f"📄 {f['name']}\n"
+                text += f"📦 {self.format_size(f['size'])}\n\n"
+                btns.append([
+                    InlineKeyboardButton(f"📦 Extract {f['name'][:15]}", callback_data=f"extract_{f['id']}"),
+                    InlineKeyboardButton(f"🗜️ Compress", callback_data=f"compress_{f['id']}")
+                ])
+                btns.append([
+                    InlineKeyboardButton(f"✏️ Rename", callback_data=f"rename_{f['id']}"),
+                    InlineKeyboardButton(f"🗑️ Delete", callback_data=f"delete_{f['id']}")
+                ])
             
-        user_id = update.effective_user.id
-        file = update.message.document
-        
-        if not file:
-            await update.message.reply_text("❌ Please send a file.")
-            return
+            btns.append([InlineKeyboardButton("📤 Upload More", callback_data="upload")])
+            btns.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")])
             
-        if file.file_size > MAX_FILE_SIZE:
-            await self.delete_previous_messages(update, context)
-            msg = await update.message.reply_text(
-                f"❌ <b>File Too Large!</b>\n\n"
-                f"📄 File: {file.file_name}\n"
-                f"📦 Size: {file.file_size / (1024 * 1024 * 1024):.2f} GB\n"
-                f"⚠️ Max allowed: 2 GB\n\n"
-                f"<i>Please send a smaller file.</i>",
-                parse_mode='HTML'
+            query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(btns),
+                parse_mode=ParseMode.HTML
             )
-            await self.save_message_id(update, msg)
             return
         
-        if user_id not in user_data:
-            user_data[user_id] = {
-                'files': [],
-                'file_names': [],
-                'file_ids': [],
-                'file_sizes': [],
-                'message_ids': []
-            }
-        elif 'message_ids' not in user_data[user_id]:
-            user_data[user_id]['message_ids'] = []
-        elif 'files' not in user_data[user_id]:
-            user_data[user_id]['files'] = []
-            user_data[user_id]['file_names'] = []
-            user_data[user_id]['file_ids'] = []
-            user_data[user_id]['file_sizes'] = []
+        # ---- DELETE FILE ----
+        if data.startswith("delete_"):
+            file_id = data.replace("delete_", "")
+            file_data = self.db.get_file(file_id)
+            
+            if file_data:
+                # Delete from GitHub
+                self.github.delete_file(file_data['name'], user_id)
+                self.db.delete_file(file_id)
+            
+            query.edit_message_text(
+                "✅ File deleted!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ])
+            )
+            return
         
-        user_data[user_id]['files'].append(file)
-        user_data[user_id]['file_names'].append(file.file_name)
-        user_data[user_id]['file_ids'].append(file.file_id)
-        user_data[user_id]['file_sizes'].append(file.file_size)
+        # ---- EXTRACT FILE ----
+        if data.startswith("extract_"):
+            file_id = data.replace("extract_", "")
+            await self.extract_file(update, context, user_id, file_id)
+            return
+        
+        # ---- COMPRESS FILE ----
+        if data.startswith("compress_"):
+            file_id = data.replace("compress_", "")
+            await self.compress_file(update, context, user_id, file_id)
+            return
+        
+        # ---- RENAME FILE ----
+        if data.startswith("rename_"):
+            file_id = data.replace("rename_", "")
+            self.user_sessions[user_id] = {'step': 'waiting_rename', 'file_id': file_id}
+            
+            query.edit_message_text(
+                f"✏️ <b>Rename File</b>\n\n"
+                f"Send the new name for this file.\n"
+                f"Example: <code>new_name.txt</code>\n\n"
+                f"Send /cancel to cancel",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ---- CANCEL ----
+        if data == "cancel":
+            self.user_sessions.pop(user_id, None)
+            query.edit_message_text(
+                "❌ Cancelled",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ])
+            )
+            return
+
+    # ============================================
+    # FILE HANDLER
+    # ============================================
+    def file_handler(self, update: Update, context: CallbackContext):
+        user_id = update.effective_user.id
+        msg = update.message
+        
+        # Check force join
+        if not self.check_force_join(context, user_id):
+            msg.reply_text(
+                f"🔒 Please join {FORCE_CHANNEL} first",
+                reply_markup=self.get_force_join_keyboard()
+            )
+            return
+        
+        session = self.user_sessions.get(user_id)
+        if not session or session.get('step') != 'waiting_file':
+            msg.reply_text(
+                "⚠️ Please use the 'Upload Files' button first.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Upload", callback_data="upload")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ])
+            )
+            return
+        
+        # Get file
+        file = None
+        file_name = None
+        file_size = 0
+        file_id = None
+        
+        if msg.document:
+            file = msg.document
+            file_name = file.file_name or 'document'
+            file_size = file.file_size
+            file_id = file.file_id
+        elif msg.photo:
+            file = msg.photo[-1]
+            file_name = f'photo_{int(time.time())}.jpg'
+            file_size = file.file_size
+            file_id = file.file_id
+        elif msg.video:
+            file = msg.video
+            file_name = file.file_name or 'video.mp4'
+            file_size = file.file_size
+            file_id = file.file_id
+        else:
+            msg.reply_text("❌ Please send a document, photo, or video.")
+            return
+        
+        # Check size
+        if file_size > MAX_FILE_SIZE:
+            msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
+            return
+        
+        # Download file
+        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
+        file_obj = msg.bot.get_file(file_id)
+        file_obj.download(temp_path)
         
         # Upload to GitHub
-        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file.file_name}")
-        file_obj = await file.get_file()
-        await file_obj.download_to_drive(temp_path)
-        
-        success, result = await self.github.upload_file(temp_path, file.file_name, user_id)
-        os.remove(temp_path)
+        success, result = self.github.upload_file(temp_path, file_name, user_id)
         
         if success:
-            user_data[user_id]['github_files'] = user_data[user_id].get('github_files', [])
-            user_data[user_id]['github_files'].append(file.file_name)
+            # Save to database
+            unique_id = secrets.token_hex(16)
+            self.db.add_file(unique_id, user_id, file_name, file_size, file_id, result)
+            
+            msg.reply_text(
+                f"✅ <b>File Uploaded!</b>\n\n"
+                f"📄 {file_name}\n"
+                f"📦 {self.format_size(file_size)}\n"
+                f"🔒 Stored on GitHub\n\n"
+                f"📤 Upload more files or click the menu below.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Upload More", callback_data="upload")],
+                    [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+                    [InlineKeyboardButton("✅ Done", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            msg.reply_text(f"❌ Upload failed: {result}")
         
-        await self.delete_previous_messages(update, context)
-        
-        keyboard = [
-            [InlineKeyboardButton("📋 Go to Menu", callback_data="done_upload")],
-            [InlineKeyboardButton("➕ Upload More", callback_data="add_more")],
-            [InlineKeyboardButton("🗑️ Clear All", callback_data="clear_files")],
-            [InlineKeyboardButton("🏠 Home", callback_data="home")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        file_count = len(user_data[user_id]['files'])
-        total_size = sum(user_data[user_id]['file_sizes']) / (1024 * 1024)
-        
-        status = "✅ Uploaded to GitHub" if success else "❌ Upload failed"
-        
-        msg = await update.message.reply_text(
-            f"✅ <b>File uploaded!</b>\n\n"
-            f"📄 <b>Files:</b> {file_count}\n"
-            f"📦 <b>Total Size:</b> {total_size:.2f} MB\n"
-            f"📝 <b>Last file:</b> {file.file_name}\n"
-            f"🔒 <b>GitHub:</b> {status}\n\n"
-            f"Click <b>📋 Go to Menu</b> to access all features.",
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-        await self.save_message_id(update, msg)
+        # Cleanup
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
-    # ... (rest of the methods - show_main_options, show_compress_options, etc.)
-    # I'll continue with the full code in the next message due to character limit
+    # ============================================
+    # TEXT HANDLER
+    # ============================================
+    def text_handler(self, update: Update, context: CallbackContext):
+        user_id = update.effective_user.id
+        text = update.message.text
+        
+        # Check force join
+        if not self.check_force_join(context, user_id):
+            update.message.reply_text(
+                f"🔒 Please join {FORCE_CHANNEL} first",
+                reply_markup=self.get_force_join_keyboard()
+            )
+            return
+        
+        # Handle cancel
+        if text.lower() == '/cancel':
+            self.user_sessions.pop(user_id, None)
+            update.message.reply_text(
+                "❌ Cancelled",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ])
+            )
+            return
+        
+        session = self.user_sessions.get(user_id)
+        
+        # Handle prefix
+        if session and session.get('step') == 'waiting_prefix':
+            self.db.update_file_prefix(user_id, text)
+            self.user_sessions.pop(user_id, None)
+            
+            update.message.reply_text(
+                f"✅ Prefix set to: <b>{text}</b>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Handle rename
+        if session and session.get('step') == 'waiting_rename':
+            file_id = session.get('file_id')
+            file_data = self.db.get_file(file_id)
+            
+            if file_data:
+                # Download from GitHub
+                temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
+                if self.github.download_file(file_data['name'], user_id, temp_path):
+                    # Upload with new name
+                    success, result = self.github.upload_file(temp_path, text, user_id)
+                    if success:
+                        # Delete old file
+                        self.github.delete_file(file_data['name'], user_id)
+                        # Update database
+                        self.db.delete_file(file_id)
+                        unique_id = secrets.token_hex(16)
+                        self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], result)
+                        
+                        update.message.reply_text(
+                            f"✅ File renamed to: <b>{text}</b>",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+                                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                            ]),
+                            parse_mode=ParseMode.HTML
+                        )
+                    else:
+                        update.message.reply_text(f"❌ Rename failed: {success}")
+                    
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                else:
+                    update.message.reply_text("❌ Could not download file from GitHub")
+            else:
+                update.message.reply_text("❌ File not found")
+            
+            self.user_sessions.pop(user_id, None)
+            return
+        
+        # If not in session, treat as file upload
+        self.file_handler(update, context)
 
-    def run(self):
-        """Run the bot"""
+    # ============================================
+    # EXTRACT FILE
+    # ============================================
+    async def extract_file(self, update, context, user_id, file_id):
+        query = update.callback_query
+        file_data = self.db.get_file(file_id)
+        
+        if not file_data:
+            query.edit_message_text("❌ File not found")
+            return
+        
+        query.edit_message_text("📦 Downloading file from GitHub...")
+        
+        # Download from GitHub
+        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
+        if not self.github.download_file(file_data['name'], user_id, temp_path):
+            query.edit_message_text("❌ Could not download file from GitHub")
+            return
+        
+        # Check extension
+        ext = os.path.splitext(file_data['name'])[1].lower()
+        if ext not in ['.zip', '.rar', '.7z']:
+            query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return
+        
+        query.edit_message_text(f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(0)}")
+        
         try:
-            self.application = Application.builder().token(BOT_TOKEN).build()
+            extract_dir = os.path.join(TEMP_DIR, f"{user_id}_extracted")
+            os.makedirs(extract_dir, exist_ok=True)
             
-            self.application.add_handler(CommandHandler("start", self.start))
-            self.application.add_handler(MessageHandler(filters.Document.ALL, self.handle_file))
-            self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
-            self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input))
-            self.application.add_handler(CallbackQueryHandler(self.button_handler))
+            if ext == '.zip':
+                with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                    total = len(zip_ref.namelist())
+                    for i, name in enumerate(zip_ref.namelist()):
+                        zip_ref.extract(name, extract_dir)
+                        if i % 5 == 0:
+                            progress = (i / total) * 100
+                            query.edit_message_text(
+                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                            )
+                            
+            elif ext == '.rar':
+                with rarfile.RarFile(temp_path) as rar_ref:
+                    total = len(rar_ref.namelist())
+                    for i, name in enumerate(rar_ref.namelist()):
+                        rar_ref.extract(name, extract_dir)
+                        if i % 5 == 0:
+                            progress = (i / total) * 100
+                            query.edit_message_text(
+                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                            )
+                            
+            elif ext == '.7z':
+                with py7zr.SevenZipFile(temp_path, mode='r') as sz_ref:
+                    files = sz_ref.getnames()
+                    total = len(files)
+                    for i, name in enumerate(files):
+                        sz_ref.extract(targets=[name], path=extract_dir)
+                        if i % 2 == 0:
+                            progress = (i / total) * 100
+                            query.edit_message_text(
+                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                            )
             
-            logger.info("🤖 Bot is running successfully!")
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+            query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
+            
+            # Send extracted files
+            extracted = []
+            for root, dirs, files in os.walk(extract_dir):
+                for f in files:
+                    extracted.append(os.path.join(root, f))
+            
+            if extracted:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"📤 Sending {len(extracted)} extracted files..."
+                )
+                
+                for f_path in extracted:
+                    if os.path.getsize(f_path) < MAX_FILE_SIZE:
+                        with open(f_path, 'rb') as doc:
+                            await context.bot.send_document(
+                                chat_id=query.message.chat_id,
+                                document=doc,
+                                filename=os.path.basename(f_path)
+                            )
+            
+            # Cleanup
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            
         except Exception as e:
-            logger.error(f"❌ Failed to start bot: {e}")
-            sys.exit(1)
+            query.edit_message_text(f"❌ Extraction error: {str(e)}")
+        
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
-if __name__ == "__main__":
-    bot = ArchiveBot()
-    bot.run()
+    # ============================================
+    # COMPRESS FILE
+    # ============================================
+    async def compress_file(self, update, context, user_id, file_id):
+        query = update.callback_query
+        file_data = self.db.get_file(file_id)
+        
+        if not file_data:
+            query.edit_message_text("❌ File not found")
+            return
+        
+        # Show format options
+        kb = [
+            [InlineKeyboardButton("📦 ZIP", callback_data=f"compress_zip_{file_id}")],
+            [InlineKeyboardButton("📦 7Z", callback_data=f"compress_7z_{file_id}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
+        ]
+        
+        query.edit_message_text(
+            f"🗜️ <b>Compress: {file_data['name']}</b>\n\n"
+            f"Choose compression format:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    # ============================================
+    # PHOTO HANDLER (for thumbnails)
+    # ============================================
+    def photo_handler(self, update: Update, context: CallbackContext):
+        # This will be expanded for thumbnail support
+        pass
+
+    # ============================================
+    # RUN BOT
+    # ============================================
+    def run(self):
+        logger.info('🚀 Starting Archive Bot...')
+        
+        # Create updater with older API (13.7)
+        updater = Updater(BOT_TOKEN, use_context=True)
+        dp = updater.dispatcher
+        
+        # Store bot info
+        bot_info = updater.bot.get_me()
+        self.bot_username = bot_info.username
+        self.bot_id = bot_info.id
+        logger.info(f'✅ Bot running: @{self.bot_username}')
+        
+        # Set commands
+        updater.bot.set_my_commands([
+            ('start', '🚀 Start the bot'),
+        ])
+        
+        # Add handlers
+        dp.add_handler(CommandHandler('start', self.start_command))
+        dp.add_handler(MessageHandler(Filters.document, self.file_handler))
+        dp.add_handler(MessageHandler(Filters.photo, self.photo_handler))
+        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, self.text_handler))
+        dp.add_handler(CallbackQueryHandler(self.callback_handler))
+        
+        logger.info('✅ Bot is ready!')
+        
+        # Start polling
+        updater.start_polling()
+        logger.info('🔄 Polling started...')
+        
+        # Keep bot running
+        updater.idle()
+        
+        # Cleanup
+        self.db.close()
+        logger.info('🛑 Bot stopped')
+
+
+# ============================================
+# MAIN
+# ============================================
+if __name__ == '__main__':
+    try:
+        bot = ArchiveBot()
+        bot.run()
+    except KeyboardInterrupt:
+        logger.info('🛑 Bot stopped by user')
+    except Exception as e:
+        logger.error(f'❌ Fatal error: {e}')
+        sys.exit(1)
