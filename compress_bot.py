@@ -18,7 +18,6 @@ import py7zr
 import time
 import base64
 import requests
-import asyncio
 import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
@@ -539,11 +538,11 @@ class ArchiveBot:
             text = f"📂 <b>My Files</b> ({len(files)})\n\n"
             btns = []
             
-            for f in files[:10]:
+            for f in files[:5]:
                 text += f"📄 {f['name']}\n"
                 text += f"📦 {self.format_size(f['size'])}\n\n"
                 btns.append([
-                    InlineKeyboardButton(f"📦 Extract {f['name'][:15]}", callback_data=f"extract_{f['id']}"),
+                    InlineKeyboardButton(f"📦 Extract {f['name'][:10]}", callback_data=f"extract_{f['id']}"),
                     InlineKeyboardButton(f"🗜️ Compress", callback_data=f"compress_{f['id']}")
                 ])
                 btns.append([
@@ -583,13 +582,13 @@ class ArchiveBot:
         # ---- EXTRACT FILE ----
         if data.startswith("extract_"):
             file_id = data.replace("extract_", "")
-            await self.extract_file(update, context, user_id, file_id)
+            self.extract_file(update, context, user_id, file_id)
             return
         
         # ---- COMPRESS FILE ----
         if data.startswith("compress_"):
             file_id = data.replace("compress_", "")
-            await self.compress_file(update, context, user_id, file_id)
+            self.compress_file(update, context, user_id, file_id)
             return
         
         # ---- RENAME FILE ----
@@ -793,9 +792,9 @@ class ArchiveBot:
         self.file_handler(update, context)
 
     # ============================================
-    # EXTRACT FILE
+    # EXTRACT FILE (Synchronous version)
     # ============================================
-    async def extract_file(self, update, context, user_id, file_id):
+    def extract_file(self, update, context, user_id, file_id):
         query = update.callback_query
         file_data = self.db.get_file(file_id)
         
@@ -831,7 +830,7 @@ class ArchiveBot:
                     for i, name in enumerate(zip_ref.namelist()):
                         zip_ref.extract(name, extract_dir)
                         if i % 5 == 0:
-                            progress = (i / total) * 100
+                            progress = (i / total) * 100 if total > 0 else 0
                             query.edit_message_text(
                                 f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
                             )
@@ -842,7 +841,7 @@ class ArchiveBot:
                     for i, name in enumerate(rar_ref.namelist()):
                         rar_ref.extract(name, extract_dir)
                         if i % 5 == 0:
-                            progress = (i / total) * 100
+                            progress = (i / total) * 100 if total > 0 else 0
                             query.edit_message_text(
                                 f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
                             )
@@ -854,9 +853,9 @@ class ArchiveBot:
                     for i, name in enumerate(files):
                         sz_ref.extract(targets=[name], path=extract_dir)
                         if i % 2 == 0:
-                            progress = (i / total) * 100
+                            progress = (i / total) * 100 if total > 0 else 0
                             query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                                f"?? Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
                             )
             
             query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
@@ -868,7 +867,7 @@ class ArchiveBot:
                     extracted.append(os.path.join(root, f))
             
             if extracted:
-                await context.bot.send_message(
+                context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=f"📤 Sending {len(extracted)} extracted files..."
                 )
@@ -876,7 +875,7 @@ class ArchiveBot:
                 for f_path in extracted:
                     if os.path.getsize(f_path) < MAX_FILE_SIZE:
                         with open(f_path, 'rb') as doc:
-                            await context.bot.send_document(
+                            context.bot.send_document(
                                 chat_id=query.message.chat_id,
                                 document=doc,
                                 filename=os.path.basename(f_path)
@@ -894,7 +893,7 @@ class ArchiveBot:
     # ============================================
     # COMPRESS FILE
     # ============================================
-    async def compress_file(self, update, context, user_id, file_id):
+    def compress_file(self, update, context, user_id, file_id):
         query = update.callback_query
         file_data = self.db.get_file(file_id)
         
