@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - CLEAN ASYNC VERSION
+# TELEGRAM ARCHIVE BOT - WORKING VERSION
 # Compatible with python-telegram-bot 20.8
 # Uses GitHub for storage, force join channels
 # ============================================
@@ -36,7 +36,6 @@ if not BOT_TOKEN:
     print('❌ BOT_TOKEN is not set')
     sys.exit(1)
 
-# GitHub Configuration
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_OWNER = os.getenv('GITHUB_OWNER')
 GITHUB_REPO = os.getenv('GITHUB_REPO')
@@ -46,24 +45,22 @@ if not GITHUB_TOKEN or not GITHUB_OWNER or not GITHUB_REPO:
     print('❌ GitHub credentials not set')
     sys.exit(1)
 
-# Force Join Configuration
 FORCE_CHANNEL = os.getenv('FORCE_CHANNEL', '@NCK_Dev')
 FORCE_CHANNEL_ID = int(os.getenv('FORCE_CHANNEL_ID', '-1002583286874'))
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 TEMP_DIR = os.getenv('TEMP_DIR', 'temp_downloads')
 DB_PATH = os.getenv('DB_PATH', './data/bot_database.db')
 
-# Create directories
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
 
 # ============================================
 # DATABASE CLASS
@@ -79,7 +76,6 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         cursor = self.conn.cursor()
 
-        # Users table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -90,7 +86,6 @@ class Database:
             )
         ''')
 
-        # Files table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY,
@@ -875,21 +870,18 @@ class ArchiveBot:
         logger.info('🚀 Starting Archive Bot...')
         
         try:
-            # Create application - ONLY use Application, NO Updater
+            # Create application - ONLY Application, NO Updater
             application = Application.builder().token(BOT_TOKEN).build()
             
-            # Store bot info
             bot_info = application.bot.get_me()
             self.bot_username = bot_info.username
             self.bot_id = bot_info.id
             logger.info(f'✅ Bot running: @{self.bot_username}')
             
-            # Set commands
             application.bot.set_my_commands([
                 ('start', '🚀 Start the bot'),
             ])
             
-            # Add handlers
             application.add_handler(CommandHandler('start', self.start_command))
             application.add_handler(MessageHandler(filters.Document.ALL, self.file_handler))
             application.add_handler(MessageHandler(filters.PHOTO, self.photo_handler))
@@ -898,14 +890,13 @@ class ArchiveBot:
             
             logger.info('✅ Bot is ready!')
             
-            # Start polling - CORRECT way for python-telegram-bot 20.x
+            # This is the correct way for python-telegram-bot 20.x
             application.run_polling(allowed_updates=Update.ALL_TYPES)
             
         except Exception as e:
             logger.error(f'❌ Bot error: {e}')
             raise
         
-        # Cleanup
         self.db.close()
         logger.info('🛑 Bot stopped')
 
