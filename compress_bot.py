@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - ASYNC VERSION
+# TELEGRAM ARCHIVE BOT - CLEAN ASYNC VERSION
 # Compatible with python-telegram-bot 20.8
 # Uses GitHub for storage, force join channels
 # ============================================
@@ -90,7 +90,7 @@ class Database:
             )
         ''')
 
-        # Files table (local references to GitHub files)
+        # Files table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY,
@@ -191,7 +191,6 @@ class GitHubManager:
         }
 
     def upload_file(self, file_path: str, file_name: str, user_id: int) -> tuple:
-        """Upload file to GitHub"""
         try:
             with open(file_path, 'rb') as f:
                 content = f.read()
@@ -200,7 +199,6 @@ class GitHubManager:
             path = f"user_files/{user_id}/{file_name}"
             url = f"{self.base_url}/{path}"
             
-            # Check if exists
             sha = None
             try:
                 response = requests.get(url, headers=self.headers)
@@ -228,7 +226,6 @@ class GitHubManager:
             return False, str(e)
 
     def delete_file(self, file_name: str, user_id: int) -> tuple:
-        """Delete file from GitHub"""
         try:
             path = f"user_files/{user_id}/{file_name}"
             url = f"{self.base_url}/{path}"
@@ -256,7 +253,6 @@ class GitHubManager:
             return False, str(e)
 
     def download_file(self, file_name: str, user_id: int, save_path: str) -> bool:
-        """Download file from GitHub"""
         try:
             url = f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/user_files/{user_id}/{file_name}"
             response = requests.get(url)
@@ -315,7 +311,6 @@ class ArchiveBot:
         return f'{bytes / 1073741824:.2f} GB'
 
     async def check_force_join(self, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-        """Check if user has joined force channel"""
         try:
             member = await context.bot.get_chat_member(FORCE_CHANNEL_ID, user_id)
             return member.status in ['member', 'administrator', 'creator']
@@ -334,7 +329,6 @@ class ArchiveBot:
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        # Check force join
         if not await self.check_force_join(context, user_id):
             await update.message.reply_text(
                 f"🔒 <b>Access Denied</b>\n\n"
@@ -346,14 +340,10 @@ class ArchiveBot:
             )
             return
         
-        # Create user
         user = update.effective_user
         self.db.create_user(user_id, user.username or '', user.first_name or 'User')
-        
-        # Get prefix
         prefix = self.db.get_file_prefix(user_id)
         
-        # Main menu
         kb = [
             [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
             [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
@@ -381,7 +371,6 @@ class ArchiveBot:
         user_id = query.from_user.id
         data = query.data
         
-        # Check force join
         if data != "check_join" and not await self.check_force_join(context, user_id):
             await query.edit_message_text(
                 f"🔒 <b>Access Denied</b>\n\n"
@@ -415,7 +404,6 @@ class ArchiveBot:
                 )
             return
         
-        # ---- HELP ----
         if data == "help":
             await query.edit_message_text(
                 "❓ <b>Help</b>\n\n"
@@ -424,7 +412,7 @@ class ArchiveBot:
                 "⚙️ <b>Settings</b>: Set file prefix\n\n"
                 "<b>File Actions:</b>\n"
                 "📦 Extract: Unpack ZIP/RAR/7z\n"
-                "🗜️ Compress: Create ZIP/7z with levels\n"
+                "🗜️ Compress: Create ZIP/7z\n"
                 "✏️ Rename: Rename files\n"
                 "🗑️ Delete: Remove from storage\n\n"
                 f"📢 Required Channel: {FORCE_CHANNEL}",
@@ -435,7 +423,6 @@ class ArchiveBot:
             )
             return
         
-        # ---- BACK TO MENU ----
         if data == "back_to_menu":
             prefix = self.db.get_file_prefix(user_id)
             user = self.db.get_user(user_id)
@@ -457,7 +444,6 @@ class ArchiveBot:
             )
             return
         
-        # ---- SETTINGS ----
         if data == "settings":
             prefix = self.db.get_file_prefix(user_id)
             
@@ -476,10 +462,8 @@ class ArchiveBot:
             )
             return
         
-        # ---- SET PREFIX ----
         if data == "set_prefix":
             self.user_sessions[user_id] = {'step': 'waiting_prefix'}
-            
             await query.edit_message_text(
                 "📝 <b>Set File Prefix</b>\n\n"
                 "Send your desired prefix in the chat.\n"
@@ -489,10 +473,8 @@ class ArchiveBot:
             )
             return
         
-        # ---- REMOVE PREFIX ----
         if data == "remove_prefix":
             self.db.update_file_prefix(user_id, '')
-            
             await query.edit_message_text(
                 "✅ Prefix removed!",
                 reply_markup=InlineKeyboardMarkup([
@@ -501,10 +483,8 @@ class ArchiveBot:
             )
             return
         
-        # ---- UPLOAD ----
         if data == "upload":
             self.user_sessions[user_id] = {'step': 'waiting_file'}
-            
             await query.edit_message_text(
                 "📤 <b>Upload Files</b>\n\n"
                 "Send any file(s) you want to store on GitHub.\n"
@@ -515,7 +495,6 @@ class ArchiveBot:
             )
             return
         
-        # ---- MY FILES ----
         if data == "my_files":
             files = self.db.get_user_files(user_id)
             
@@ -539,7 +518,7 @@ class ArchiveBot:
                 text += f"📄 {f['name']}\n"
                 text += f"📦 {self.format_size(f['size'])}\n\n"
                 btns.append([
-                    InlineKeyboardButton(f"📦 Extract {f['name'][:10]}", callback_data=f"extract_{f['id']}"),
+                    InlineKeyboardButton(f"📦 Extract", callback_data=f"extract_{f['id']}"),
                     InlineKeyboardButton(f"🗜️ Compress", callback_data=f"compress_{f['id']}")
                 ])
                 btns.append([
@@ -557,13 +536,11 @@ class ArchiveBot:
             )
             return
         
-        # ---- DELETE FILE ----
         if data.startswith("delete_"):
             file_id = data.replace("delete_", "")
             file_data = self.db.get_file(file_id)
             
             if file_data:
-                # Delete from GitHub
                 self.github.delete_file(file_data['name'], user_id)
                 self.db.delete_file(file_id)
             
@@ -576,23 +553,19 @@ class ArchiveBot:
             )
             return
         
-        # ---- EXTRACT FILE ----
         if data.startswith("extract_"):
             file_id = data.replace("extract_", "")
             await self.extract_file(update, context, user_id, file_id)
             return
         
-        # ---- COMPRESS FILE ----
         if data.startswith("compress_"):
             file_id = data.replace("compress_", "")
             await self.compress_file(update, context, user_id, file_id)
             return
         
-        # ---- RENAME FILE ----
         if data.startswith("rename_"):
             file_id = data.replace("rename_", "")
             self.user_sessions[user_id] = {'step': 'waiting_rename', 'file_id': file_id}
-            
             await query.edit_message_text(
                 f"✏️ <b>Rename File</b>\n\n"
                 f"Send the new name for this file.\n"
@@ -602,7 +575,6 @@ class ArchiveBot:
             )
             return
         
-        # ---- CANCEL ----
         if data == "cancel":
             self.user_sessions.pop(user_id, None)
             await query.edit_message_text(
@@ -620,7 +592,6 @@ class ArchiveBot:
         user_id = update.effective_user.id
         msg = update.message
         
-        # Check force join
         if not await self.check_force_join(context, user_id):
             await msg.reply_text(
                 f"🔒 Please join {FORCE_CHANNEL} first",
@@ -639,7 +610,6 @@ class ArchiveBot:
             )
             return
         
-        # Get file
         file = None
         file_name = None
         file_size = 0
@@ -664,21 +634,17 @@ class ArchiveBot:
             await msg.reply_text("❌ Please send a document, photo, or video.")
             return
         
-        # Check size
         if file_size > MAX_FILE_SIZE:
             await msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
             return
         
-        # Download file
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
         file_obj = await context.bot.get_file(file_id)
         await file_obj.download_to_drive(temp_path)
         
-        # Upload to GitHub
         success, result = self.github.upload_file(temp_path, file_name, user_id)
         
         if success:
-            # Save to database
             unique_id = secrets.token_hex(16)
             self.db.add_file(unique_id, user_id, file_name, file_size, file_id, result)
             
@@ -698,7 +664,6 @@ class ArchiveBot:
         else:
             await msg.reply_text(f"❌ Upload failed: {result}")
         
-        # Cleanup
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
@@ -709,7 +674,6 @@ class ArchiveBot:
         user_id = update.effective_user.id
         text = update.message.text
         
-        # Check force join
         if not await self.check_force_join(context, user_id):
             await update.message.reply_text(
                 f"🔒 Please join {FORCE_CHANNEL} first",
@@ -717,7 +681,6 @@ class ArchiveBot:
             )
             return
         
-        # Handle cancel
         if text and text.lower() == '/cancel':
             self.user_sessions.pop(user_id, None)
             await update.message.reply_text(
@@ -730,11 +693,9 @@ class ArchiveBot:
         
         session = self.user_sessions.get(user_id)
         
-        # Handle prefix
         if session and session.get('step') == 'waiting_prefix':
             self.db.update_file_prefix(user_id, text)
             self.user_sessions.pop(user_id, None)
-            
             await update.message.reply_text(
                 f"✅ Prefix set to: <b>{text}</b>",
                 reply_markup=InlineKeyboardMarkup([
@@ -745,21 +706,16 @@ class ArchiveBot:
             )
             return
         
-        # Handle rename
         if session and session.get('step') == 'waiting_rename':
             file_id = session.get('file_id')
             file_data = self.db.get_file(file_id)
             
             if file_data:
-                # Download from GitHub
                 temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
                 if self.github.download_file(file_data['name'], user_id, temp_path):
-                    # Upload with new name
                     success, result = self.github.upload_file(temp_path, text, user_id)
                     if success:
-                        # Delete old file
                         self.github.delete_file(file_data['name'], user_id)
-                        # Update database
                         self.db.delete_file(file_id)
                         unique_id = secrets.token_hex(16)
                         self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], result)
@@ -785,11 +741,10 @@ class ArchiveBot:
             self.user_sessions.pop(user_id, None)
             return
         
-        # If not in session, treat as file upload
         await self.file_handler(update, context)
 
     # ============================================
-    # EXTRACT FILE (Async)
+    # EXTRACT FILE
     # ============================================
     async def extract_file(self, update, context, user_id, file_id):
         query = update.callback_query
@@ -801,13 +756,11 @@ class ArchiveBot:
         
         await query.edit_message_text("📦 Downloading file from GitHub...")
         
-        # Download from GitHub
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
         if not self.github.download_file(file_data['name'], user_id, temp_path):
             await query.edit_message_text("❌ Could not download file from GitHub")
             return
         
-        # Check extension
         ext = os.path.splitext(file_data['name'])[1].lower()
         if ext not in ['.zip', '.rar', '.7z']:
             await query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
@@ -857,7 +810,6 @@ class ArchiveBot:
             
             await query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
             
-            # Send extracted files
             extracted = []
             for root, dirs, files in os.walk(extract_dir):
                 for f in files:
@@ -878,7 +830,6 @@ class ArchiveBot:
                                 filename=os.path.basename(f_path)
                             )
             
-            # Cleanup
             shutil.rmtree(extract_dir, ignore_errors=True)
             
         except Exception as e:
@@ -898,7 +849,6 @@ class ArchiveBot:
             await query.edit_message_text("❌ File not found")
             return
         
-        # Show format options
         kb = [
             [InlineKeyboardButton("📦 ZIP", callback_data=f"compress_zip_{file_id}")],
             [InlineKeyboardButton("📦 7Z", callback_data=f"compress_7z_{file_id}")],
@@ -916,7 +866,6 @@ class ArchiveBot:
     # PHOTO HANDLER
     # ============================================
     async def photo_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Handle photo uploads as files
         await self.file_handler(update, context)
 
     # ============================================
@@ -925,31 +874,36 @@ class ArchiveBot:
     def run(self):
         logger.info('🚀 Starting Archive Bot...')
         
-        # Create application
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Store bot info
-        bot_info = application.bot.get_me()
-        self.bot_username = bot_info.username
-        self.bot_id = bot_info.id
-        logger.info(f'✅ Bot running: @{self.bot_username}')
-        
-        # Set commands
-        application.bot.set_my_commands([
-            ('start', '🚀 Start the bot'),
-        ])
-        
-        # Add handlers
-        application.add_handler(CommandHandler('start', self.start_command))
-        application.add_handler(MessageHandler(filters.Document.ALL, self.file_handler))
-        application.add_handler(MessageHandler(filters.PHOTO, self.photo_handler))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
-        application.add_handler(CallbackQueryHandler(self.callback_handler))
-        
-        logger.info('✅ Bot is ready!')
-        
-        # Start polling
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        try:
+            # Create application - ONLY use Application, NO Updater
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            # Store bot info
+            bot_info = application.bot.get_me()
+            self.bot_username = bot_info.username
+            self.bot_id = bot_info.id
+            logger.info(f'✅ Bot running: @{self.bot_username}')
+            
+            # Set commands
+            application.bot.set_my_commands([
+                ('start', '🚀 Start the bot'),
+            ])
+            
+            # Add handlers
+            application.add_handler(CommandHandler('start', self.start_command))
+            application.add_handler(MessageHandler(filters.Document.ALL, self.file_handler))
+            application.add_handler(MessageHandler(filters.PHOTO, self.photo_handler))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
+            application.add_handler(CallbackQueryHandler(self.callback_handler))
+            
+            logger.info('✅ Bot is ready!')
+            
+            # Start polling - CORRECT way for python-telegram-bot 20.x
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+            
+        except Exception as e:
+            logger.error(f'❌ Bot error: {e}')
+            raise
         
         # Cleanup
         self.db.close()
