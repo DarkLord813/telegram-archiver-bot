@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - WORKING VERSION
-# Compatible with python-telegram-bot 13.7
+# TELEGRAM ARCHIVE BOT - ASYNC VERSION
+# Compatible with python-telegram-bot 20.8
 # Uses GitHub for storage, force join channels
 # ============================================
 
@@ -10,7 +10,6 @@ import sys
 import sqlite3
 import secrets
 import logging
-import re
 import shutil
 import zipfile
 import rarfile
@@ -18,12 +17,12 @@ import py7zr
 import time
 import base64
 import requests
-import threading
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime
 from typing import Optional, Dict, List
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Bot
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -315,10 +314,10 @@ class ArchiveBot:
             return f'{bytes / 1048576:.1f} MB'
         return f'{bytes / 1073741824:.2f} GB'
 
-    def check_force_join(self, context: CallbackContext, user_id: int) -> bool:
+    async def check_force_join(self, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
         """Check if user has joined force channel"""
         try:
-            member = context.bot.get_chat_member(FORCE_CHANNEL_ID, user_id)
+            member = await context.bot.get_chat_member(FORCE_CHANNEL_ID, user_id)
             return member.status in ['member', 'administrator', 'creator']
         except:
             return False
@@ -332,19 +331,18 @@ class ArchiveBot:
     # ============================================
     # START COMMAND
     # ============================================
-    def start_command(self, update: Update, context: CallbackContext):
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        chat_id = update.effective_chat.id
         
         # Check force join
-        if not self.check_force_join(context, user_id):
-            update.message.reply_text(
+        if not await self.check_force_join(context, user_id):
+            await update.message.reply_text(
                 f"🔒 <b>Access Denied</b>\n\n"
                 f"You must join our channel to use this bot!\n\n"
                 f"📢 <b>Channel:</b> {FORCE_CHANNEL}\n\n"
                 f"<i>Click the button below to join, then click 'Check Again'</i>",
                 reply_markup=self.get_force_join_keyboard(),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -363,39 +361,39 @@ class ArchiveBot:
             [InlineKeyboardButton("❓ Help", callback_data="help")]
         ]
         
-        update.message.reply_text(
+        await update.message.reply_text(
             f"🌟 <b>Welcome {user.first_name}!</b>\n\n"
             f"📤 Upload files to GitHub storage\n"
             f"📁 Files are stored securely\n"
             f"📝 Prefix: {prefix if prefix else 'None'}\n\n"
             f"Choose an option:",
             reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode=ParseMode.HTML
+            parse_mode='HTML'
         )
 
     # ============================================
     # CALLBACK HANDLER
     # ============================================
-    def callback_handler(self, update: Update, context: CallbackContext):
+    async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        query.answer()
+        await query.answer()
         
         user_id = query.from_user.id
         data = query.data
         
         # Check force join
-        if data != "check_join" and not self.check_force_join(context, user_id):
-            query.edit_message_text(
+        if data != "check_join" and not await self.check_force_join(context, user_id):
+            await query.edit_message_text(
                 f"🔒 <b>Access Denied</b>\n\n"
                 f"You must join our channel to use this bot!\n\n"
                 f"📢 <b>Channel:</b> {FORCE_CHANNEL}",
                 reply_markup=self.get_force_join_keyboard(),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
         if data == "check_join":
-            if self.check_force_join(context, user_id):
+            if await self.check_force_join(context, user_id):
                 user = query.from_user
                 kb = [
                     [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
@@ -403,23 +401,23 @@ class ArchiveBot:
                     [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
                     [InlineKeyboardButton("❓ Help", callback_data="help")]
                 ]
-                query.edit_message_text(
+                await query.edit_message_text(
                     f"✅ <b>Success!</b> You've joined the channel!\n\n"
                     f"🌟 Welcome {user.first_name}!",
                     reply_markup=InlineKeyboardMarkup(kb),
-                    parse_mode=ParseMode.HTML
+                    parse_mode='HTML'
                 )
             else:
-                query.edit_message_text(
+                await query.edit_message_text(
                     f"🔒 Still not joined. Please join {FORCE_CHANNEL}",
                     reply_markup=self.get_force_join_keyboard(),
-                    parse_mode=ParseMode.HTML
+                    parse_mode='HTML'
                 )
             return
         
         # ---- HELP ----
         if data == "help":
-            query.edit_message_text(
+            await query.edit_message_text(
                 "❓ <b>Help</b>\n\n"
                 "📤 <b>Upload Files</b>: Send files to store on GitHub\n"
                 "📋 <b>My Files</b>: View and manage your files\n"
@@ -428,13 +426,12 @@ class ArchiveBot:
                 "📦 Extract: Unpack ZIP/RAR/7z\n"
                 "🗜️ Compress: Create ZIP/7z with levels\n"
                 "✏️ Rename: Rename files\n"
-                "🔒 Password: Protect archives\n"
-                "🖼️ Thumbnail: Set custom preview\n\n"
+                "🗑️ Delete: Remove from storage\n\n"
                 f"📢 Required Channel: {FORCE_CHANNEL}",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                 ]),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -451,12 +448,12 @@ class ArchiveBot:
                 [InlineKeyboardButton("❓ Help", callback_data="help")]
             ]
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 f"🌟 <b>Welcome back {name}!</b>\n\n"
                 f"📝 Prefix: {prefix if prefix else 'None'}\n\n"
                 f"Choose an option:",
                 reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -470,12 +467,12 @@ class ArchiveBot:
                 [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
             ]
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 f"⚙️ <b>Settings</b>\n\n"
                 f"📝 <b>Current Prefix:</b> {prefix if prefix else 'None'}\n\n"
                 f"Prefix format: PREFIX + ORIGINAL_NAME.extension",
                 reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -483,12 +480,12 @@ class ArchiveBot:
         if data == "set_prefix":
             self.user_sessions[user_id] = {'step': 'waiting_prefix'}
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 "📝 <b>Set File Prefix</b>\n\n"
                 "Send your desired prefix in the chat.\n"
                 "Example: <code>MY_FILE_</code>\n\n"
                 "Send /cancel to cancel",
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -496,7 +493,7 @@ class ArchiveBot:
         if data == "remove_prefix":
             self.db.update_file_prefix(user_id, '')
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 "✅ Prefix removed!",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 Back", callback_data="settings")]
@@ -508,13 +505,13 @@ class ArchiveBot:
         if data == "upload":
             self.user_sessions[user_id] = {'step': 'waiting_file'}
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 "📤 <b>Upload Files</b>\n\n"
                 "Send any file(s) you want to store on GitHub.\n"
                 "You can send multiple files.\n\n"
                 "After uploading, click <b>✅ Done</b> to access the menu.\n\n"
                 "Send /cancel to cancel",
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -523,7 +520,7 @@ class ArchiveBot:
             files = self.db.get_user_files(user_id)
             
             if not files:
-                query.edit_message_text(
+                await query.edit_message_text(
                     "📂 <b>My Files</b>\n\n"
                     "No files uploaded yet.\n\n"
                     "Upload a file to get started!",
@@ -531,7 +528,7 @@ class ArchiveBot:
                         [InlineKeyboardButton("📤 Upload", callback_data="upload")],
                         [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                     ]),
-                    parse_mode=ParseMode.HTML
+                    parse_mode='HTML'
                 )
                 return
             
@@ -553,10 +550,10 @@ class ArchiveBot:
             btns.append([InlineKeyboardButton("📤 Upload More", callback_data="upload")])
             btns.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")])
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 text,
                 reply_markup=InlineKeyboardMarkup(btns),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -570,7 +567,7 @@ class ArchiveBot:
                 self.github.delete_file(file_data['name'], user_id)
                 self.db.delete_file(file_id)
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 "✅ File deleted!",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
@@ -582,13 +579,13 @@ class ArchiveBot:
         # ---- EXTRACT FILE ----
         if data.startswith("extract_"):
             file_id = data.replace("extract_", "")
-            self.extract_file(update, context, user_id, file_id)
+            await self.extract_file(update, context, user_id, file_id)
             return
         
         # ---- COMPRESS FILE ----
         if data.startswith("compress_"):
             file_id = data.replace("compress_", "")
-            self.compress_file(update, context, user_id, file_id)
+            await self.compress_file(update, context, user_id, file_id)
             return
         
         # ---- RENAME FILE ----
@@ -596,19 +593,19 @@ class ArchiveBot:
             file_id = data.replace("rename_", "")
             self.user_sessions[user_id] = {'step': 'waiting_rename', 'file_id': file_id}
             
-            query.edit_message_text(
+            await query.edit_message_text(
                 f"✏️ <b>Rename File</b>\n\n"
                 f"Send the new name for this file.\n"
                 f"Example: <code>new_name.txt</code>\n\n"
                 f"Send /cancel to cancel",
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
         # ---- CANCEL ----
         if data == "cancel":
             self.user_sessions.pop(user_id, None)
-            query.edit_message_text(
+            await query.edit_message_text(
                 "❌ Cancelled",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
@@ -619,13 +616,13 @@ class ArchiveBot:
     # ============================================
     # FILE HANDLER
     # ============================================
-    def file_handler(self, update: Update, context: CallbackContext):
+    async def file_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         msg = update.message
         
         # Check force join
-        if not self.check_force_join(context, user_id):
-            msg.reply_text(
+        if not await self.check_force_join(context, user_id):
+            await msg.reply_text(
                 f"🔒 Please join {FORCE_CHANNEL} first",
                 reply_markup=self.get_force_join_keyboard()
             )
@@ -633,7 +630,7 @@ class ArchiveBot:
         
         session = self.user_sessions.get(user_id)
         if not session or session.get('step') != 'waiting_file':
-            msg.reply_text(
+            await msg.reply_text(
                 "⚠️ Please use the 'Upload Files' button first.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📤 Upload", callback_data="upload")],
@@ -664,18 +661,18 @@ class ArchiveBot:
             file_size = file.file_size
             file_id = file.file_id
         else:
-            msg.reply_text("❌ Please send a document, photo, or video.")
+            await msg.reply_text("❌ Please send a document, photo, or video.")
             return
         
         # Check size
         if file_size > MAX_FILE_SIZE:
-            msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
+            await msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
             return
         
         # Download file
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-        file_obj = msg.bot.get_file(file_id)
-        file_obj.download(temp_path)
+        file_obj = await context.bot.get_file(file_id)
+        await file_obj.download_to_drive(temp_path)
         
         # Upload to GitHub
         success, result = self.github.upload_file(temp_path, file_name, user_id)
@@ -685,7 +682,7 @@ class ArchiveBot:
             unique_id = secrets.token_hex(16)
             self.db.add_file(unique_id, user_id, file_name, file_size, file_id, result)
             
-            msg.reply_text(
+            await msg.reply_text(
                 f"✅ <b>File Uploaded!</b>\n\n"
                 f"📄 {file_name}\n"
                 f"📦 {self.format_size(file_size)}\n"
@@ -696,10 +693,10 @@ class ArchiveBot:
                     [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
                     [InlineKeyboardButton("✅ Done", callback_data="back_to_menu")]
                 ]),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
         else:
-            msg.reply_text(f"❌ Upload failed: {result}")
+            await msg.reply_text(f"❌ Upload failed: {result}")
         
         # Cleanup
         if os.path.exists(temp_path):
@@ -708,22 +705,22 @@ class ArchiveBot:
     # ============================================
     # TEXT HANDLER
     # ============================================
-    def text_handler(self, update: Update, context: CallbackContext):
+    async def text_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         text = update.message.text
         
         # Check force join
-        if not self.check_force_join(context, user_id):
-            update.message.reply_text(
+        if not await self.check_force_join(context, user_id):
+            await update.message.reply_text(
                 f"🔒 Please join {FORCE_CHANNEL} first",
                 reply_markup=self.get_force_join_keyboard()
             )
             return
         
         # Handle cancel
-        if text.lower() == '/cancel':
+        if text and text.lower() == '/cancel':
             self.user_sessions.pop(user_id, None)
-            update.message.reply_text(
+            await update.message.reply_text(
                 "❌ Cancelled",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
@@ -738,13 +735,13 @@ class ArchiveBot:
             self.db.update_file_prefix(user_id, text)
             self.user_sessions.pop(user_id, None)
             
-            update.message.reply_text(
+            await update.message.reply_text(
                 f"✅ Prefix set to: <b>{text}</b>",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                 ]),
-                parse_mode=ParseMode.HTML
+                parse_mode='HTML'
             )
             return
         
@@ -767,58 +764,58 @@ class ArchiveBot:
                         unique_id = secrets.token_hex(16)
                         self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], result)
                         
-                        update.message.reply_text(
+                        await update.message.reply_text(
                             f"✅ File renamed to: <b>{text}</b>",
                             reply_markup=InlineKeyboardMarkup([
                                 [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
                                 [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                             ]),
-                            parse_mode=ParseMode.HTML
+                            parse_mode='HTML'
                         )
                     else:
-                        update.message.reply_text(f"❌ Rename failed: {success}")
+                        await update.message.reply_text(f"❌ Rename failed")
                     
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
                 else:
-                    update.message.reply_text("❌ Could not download file from GitHub")
+                    await update.message.reply_text("❌ Could not download file from GitHub")
             else:
-                update.message.reply_text("❌ File not found")
+                await update.message.reply_text("❌ File not found")
             
             self.user_sessions.pop(user_id, None)
             return
         
         # If not in session, treat as file upload
-        self.file_handler(update, context)
+        await self.file_handler(update, context)
 
     # ============================================
-    # EXTRACT FILE (Synchronous version)
+    # EXTRACT FILE (Async)
     # ============================================
-    def extract_file(self, update, context, user_id, file_id):
+    async def extract_file(self, update, context, user_id, file_id):
         query = update.callback_query
         file_data = self.db.get_file(file_id)
         
         if not file_data:
-            query.edit_message_text("❌ File not found")
+            await query.edit_message_text("❌ File not found")
             return
         
-        query.edit_message_text("📦 Downloading file from GitHub...")
+        await query.edit_message_text("📦 Downloading file from GitHub...")
         
         # Download from GitHub
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
         if not self.github.download_file(file_data['name'], user_id, temp_path):
-            query.edit_message_text("❌ Could not download file from GitHub")
+            await query.edit_message_text("❌ Could not download file from GitHub")
             return
         
         # Check extension
         ext = os.path.splitext(file_data['name'])[1].lower()
         if ext not in ['.zip', '.rar', '.7z']:
-            query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
+            await query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             return
         
-        query.edit_message_text(f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(0)}")
+        await query.edit_message_text(f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(0)}")
         
         try:
             extract_dir = os.path.join(TEMP_DIR, f"{user_id}_extracted")
@@ -831,7 +828,7 @@ class ArchiveBot:
                         zip_ref.extract(name, extract_dir)
                         if i % 5 == 0:
                             progress = (i / total) * 100 if total > 0 else 0
-                            query.edit_message_text(
+                            await query.edit_message_text(
                                 f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
                             )
                             
@@ -842,7 +839,7 @@ class ArchiveBot:
                         rar_ref.extract(name, extract_dir)
                         if i % 5 == 0:
                             progress = (i / total) * 100 if total > 0 else 0
-                            query.edit_message_text(
+                            await query.edit_message_text(
                                 f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
                             )
                             
@@ -854,11 +851,11 @@ class ArchiveBot:
                         sz_ref.extract(targets=[name], path=extract_dir)
                         if i % 2 == 0:
                             progress = (i / total) * 100 if total > 0 else 0
-                            query.edit_message_text(
-                                f"?? Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                            await query.edit_message_text(
+                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
                             )
             
-            query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
+            await query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
             
             # Send extracted files
             extracted = []
@@ -867,7 +864,7 @@ class ArchiveBot:
                     extracted.append(os.path.join(root, f))
             
             if extracted:
-                context.bot.send_message(
+                await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=f"📤 Sending {len(extracted)} extracted files..."
                 )
@@ -875,7 +872,7 @@ class ArchiveBot:
                 for f_path in extracted:
                     if os.path.getsize(f_path) < MAX_FILE_SIZE:
                         with open(f_path, 'rb') as doc:
-                            context.bot.send_document(
+                            await context.bot.send_document(
                                 chat_id=query.message.chat_id,
                                 document=doc,
                                 filename=os.path.basename(f_path)
@@ -885,7 +882,7 @@ class ArchiveBot:
             shutil.rmtree(extract_dir, ignore_errors=True)
             
         except Exception as e:
-            query.edit_message_text(f"❌ Extraction error: {str(e)}")
+            await query.edit_message_text(f"❌ Extraction error: {str(e)}")
         
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -893,12 +890,12 @@ class ArchiveBot:
     # ============================================
     # COMPRESS FILE
     # ============================================
-    def compress_file(self, update, context, user_id, file_id):
+    async def compress_file(self, update, context, user_id, file_id):
         query = update.callback_query
         file_data = self.db.get_file(file_id)
         
         if not file_data:
-            query.edit_message_text("❌ File not found")
+            await query.edit_message_text("❌ File not found")
             return
         
         # Show format options
@@ -908,19 +905,19 @@ class ArchiveBot:
             [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
         ]
         
-        query.edit_message_text(
+        await query.edit_message_text(
             f"🗜️ <b>Compress: {file_data['name']}</b>\n\n"
             f"Choose compression format:",
             reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode=ParseMode.HTML
+            parse_mode='HTML'
         )
 
     # ============================================
-    # PHOTO HANDLER (for thumbnails)
+    # PHOTO HANDLER
     # ============================================
-    def photo_handler(self, update: Update, context: CallbackContext):
-        # This will be expanded for thumbnail support
-        pass
+    async def photo_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Handle photo uploads as files
+        await self.file_handler(update, context)
 
     # ============================================
     # RUN BOT
@@ -928,36 +925,31 @@ class ArchiveBot:
     def run(self):
         logger.info('🚀 Starting Archive Bot...')
         
-        # Create updater with older API (13.7)
-        updater = Updater(BOT_TOKEN, use_context=True)
-        dp = updater.dispatcher
+        # Create application
+        application = Application.builder().token(BOT_TOKEN).build()
         
         # Store bot info
-        bot_info = updater.bot.get_me()
+        bot_info = application.bot.get_me()
         self.bot_username = bot_info.username
         self.bot_id = bot_info.id
         logger.info(f'✅ Bot running: @{self.bot_username}')
         
         # Set commands
-        updater.bot.set_my_commands([
+        application.bot.set_my_commands([
             ('start', '🚀 Start the bot'),
         ])
         
         # Add handlers
-        dp.add_handler(CommandHandler('start', self.start_command))
-        dp.add_handler(MessageHandler(Filters.document, self.file_handler))
-        dp.add_handler(MessageHandler(Filters.photo, self.photo_handler))
-        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, self.text_handler))
-        dp.add_handler(CallbackQueryHandler(self.callback_handler))
+        application.add_handler(CommandHandler('start', self.start_command))
+        application.add_handler(MessageHandler(filters.Document.ALL, self.file_handler))
+        application.add_handler(MessageHandler(filters.PHOTO, self.photo_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
+        application.add_handler(CallbackQueryHandler(self.callback_handler))
         
         logger.info('✅ Bot is ready!')
         
         # Start polling
-        updater.start_polling()
-        logger.info('🔄 Polling started...')
-        
-        # Keep bot running
-        updater.idle()
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
         # Cleanup
         self.db.close()
