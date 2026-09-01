@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - FIXED VERSION
+# TELEGRAM ARCHIVE BOT - FULL VERSION
 # Compatible with python-telegram-bot 13.7
 # ============================================
 
@@ -79,6 +79,8 @@ class Database:
                 username TEXT,
                 first_name TEXT,
                 file_prefix TEXT DEFAULT '',
+                archive_password TEXT DEFAULT '',
+                thumbnail_path TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -128,6 +130,34 @@ class Database:
         row = cursor.fetchone()
         return row['file_prefix'] if row else ''
 
+    def update_archive_password(self, user_id: int, password: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'UPDATE users SET archive_password = ? WHERE user_id = ?',
+            (password, user_id)
+        )
+        self.conn.commit()
+
+    def get_archive_password(self, user_id: int) -> str:
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT archive_password FROM users WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+        return row['archive_password'] if row else ''
+
+    def update_thumbnail(self, user_id: int, thumb_path: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'UPDATE users SET thumbnail_path = ? WHERE user_id = ?',
+            (thumb_path, user_id)
+        )
+        self.conn.commit()
+
+    def get_thumbnail(self, user_id: int) -> str:
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT thumbnail_path FROM users WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+        return row['thumbnail_path'] if row else ''
+
     def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
         cursor = self.conn.cursor()
         cursor.execute(
@@ -162,6 +192,14 @@ class Database:
         )
         self.conn.commit()
 
+    def clear_user_files(self, user_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'UPDATE files SET is_active = 0 WHERE user_id = ?',
+            (user_id,)
+        )
+        self.conn.commit()
+
     def close(self):
         if self.conn:
             self.conn.close()
@@ -182,7 +220,7 @@ class GitHubManager:
             "Accept": "application/vnd.github.v3+json"
         }
 
-    def upload_file(self, file_path: str, file_name: str, user_id: int) -> tuple:
+    def upload_file(self, file_path: str, file_name: str, user_id: int, progress_callback=None) -> tuple:
         try:
             with open(file_path, 'rb') as f:
                 content = f.read()
@@ -207,9 +245,14 @@ class GitHubManager:
             if sha:
                 data["sha"] = sha
             
+            if progress_callback:
+                progress_callback(50, f"Uploading {file_name}...")
+            
             response = requests.put(url, headers=self.headers, json=data)
             
             if response.status_code in [200, 201]:
+                if progress_callback:
+                    progress_callback(100, f"Uploaded {file_name}!")
                 return True, f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/{path}"
             else:
                 return False, f"Upload failed: {response.text}"
@@ -316,7 +359,6 @@ class ArchiveBot:
         ])
 
     def get_user_id(self, update: Update) -> Optional[int]:
-        """Safely get user ID from update"""
         if update.effective_user:
             return update.effective_user.id
         elif update.callback_query and update.callback_query.from_user:
@@ -346,7 +388,6 @@ class ArchiveBot:
         
         user = update.effective_user
         self.db.create_user(user_id, user.username or '', user.first_name or 'User')
-        prefix = self.db.get_file_prefix(user_id)
         
         kb = [
             [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
@@ -359,10 +400,107 @@ class ArchiveBot:
             f"🌟 <b>Welcome {user.first_name}!</b>\n\n"
             f"📤 Upload files to GitHub storage\n"
             f"📁 Files are stored securely\n"
-            f"📝 Prefix: {prefix if prefix else 'None'}\n\n"
+            f"⚙️ Customize settings from the menu\n\n"
             f"Choose an option:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
+        )
+
+    # ============================================
+    # SETTINGS
+    # ============================================
+    def settings_menu(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        prefix = self.db.get_file_prefix(user_id)
+        password = self.db.get_archive_password(user_id)
+        thumb = self.db.get_thumbnail(user_id)
+        
+        kb = [
+            [InlineKeyboardButton("📝 Set File Prefix", callback_data="set_prefix")],
+            [InlineKeyboardButton("🔑 Set Archive Password", callback_data="set_password")],
+            [InlineKeyboardButton("🖼️ Set Thumbnail", callback_data="set_thumb")],
+            [InlineKeyboardButton("🗑️ Remove Thumbnail", callback_data="remove_thumb")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+        ]
+        
+        settings_text = (
+            f"⚙️ <b>Settings</b>\n\n"
+            f"📝 <b>File Prefix:</b> {prefix if prefix else 'None'}\n"
+            f"🔑 <b>Archive Password:</b> {'✅ Set' if password else '❌ Not set'}\n"
+            f"🖼️ <b>Thumbnail:</b> {'✅ Set' if thumb else '❌ Not set'}\n\n"
+            f"<i>Configure your file settings below:</i>"
+        )
+        
+        query.edit_message_text(
+            settings_text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_set_prefix(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        self.user_sessions[user_id] = {'step': 'waiting_prefix'}
+        query.edit_message_text(
+            "📝 <b>Set File Prefix</b>\n\n"
+            "Send your desired prefix in the chat.\n"
+            "Example: <code>MY_FILE_</code>\n\n"
+            "Send /cancel to cancel",
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_set_password(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        self.user_sessions[user_id] = {'step': 'waiting_password'}
+        query.edit_message_text(
+            "🔑 <b>Set Archive Password</b>\n\n"
+            "Send your desired password in the chat.\n"
+            "Example: <code>mysecret123</code>\n\n"
+            "This password will be used for all archives you create.\n\n"
+            "Send /cancel to cancel",
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_set_thumb(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        self.user_sessions[user_id] = {'step': 'waiting_thumb'}
+        query.edit_message_text(
+            "🖼️ <b>Set Thumbnail</b>\n\n"
+            "Send a photo to use as thumbnail.\n\n"
+            "📸 <b>Supported:</b> JPG, PNG, WEBP\n"
+            "📏 <b>Recommended:</b> 320x320 pixels\n\n"
+            "Send /cancel to cancel",
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_remove_thumb(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        self.db.update_thumbnail(user_id, '')
+        query.edit_message_text(
+            "🗑️ Thumbnail removed!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+            ])
         )
 
     # ============================================
@@ -411,12 +549,17 @@ class ArchiveBot:
                 )
             return
         
+        # ---- HELP ----
         if data == "help":
             query.edit_message_text(
                 "❓ <b>Help</b>\n\n"
                 "📤 <b>Upload Files</b>: Send files to store on GitHub\n"
                 "📋 <b>My Files</b>: View and manage your files\n"
-                "⚙️ <b>Settings</b>: Set file prefix\n\n"
+                "⚙️ <b>Settings</b>: Customize your preferences\n\n"
+                "<b>Settings:</b>\n"
+                "📝 File Prefix: Add prefix to filenames\n"
+                "🔑 Archive Password: Protect archives\n"
+                "🖼️ Thumbnail: Set custom thumbnail\n\n"
                 "<b>File Actions:</b>\n"
                 "📦 Extract: Unpack ZIP/RAR/7z\n"
                 "🗜️ Compress: Create ZIP/7z\n"
@@ -430,78 +573,116 @@ class ArchiveBot:
             )
             return
         
+        # ---- BACK TO MENU ----
         if data == "back_to_menu":
-            prefix = self.db.get_file_prefix(user_id)
-            user = self.db.get_user(user_id)
-            name = user['first_name'] if user else 'User'
-            
-            kb = [
-                [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
-                [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
-                [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                [InlineKeyboardButton("❓ Help", callback_data="help")]
-            ]
-            
-            query.edit_message_text(
-                f"🌟 <b>Welcome back {name}!</b>\n\n"
-                f"📝 Prefix: {prefix if prefix else 'None'}\n\n"
-                f"Choose an option:",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
+            self.show_main_menu(update, context, user_id)
             return
         
+        # ---- SETTINGS ----
         if data == "settings":
-            prefix = self.db.get_file_prefix(user_id)
-            
-            kb = [
-                [InlineKeyboardButton("📝 Set File Prefix", callback_data="set_prefix")],
-                [InlineKeyboardButton("🗑️ Remove Prefix", callback_data="remove_prefix")],
-                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-            ]
-            
-            query.edit_message_text(
-                f"⚙️ <b>Settings</b>\n\n"
-                f"📝 <b>Current Prefix:</b> {prefix if prefix else 'None'}\n\n"
-                f"Prefix format: PREFIX + ORIGINAL_NAME.extension",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
+            self.settings_menu(update, context)
             return
         
         if data == "set_prefix":
-            self.user_sessions[user_id] = {'step': 'waiting_prefix'}
-            query.edit_message_text(
-                "📝 <b>Set File Prefix</b>\n\n"
-                "Send your desired prefix in the chat.\n"
-                "Example: <code>MY_FILE_</code>\n\n"
-                "Send /cancel to cancel",
-                parse_mode=ParseMode.HTML
-            )
+            self.handle_set_prefix(update, context)
             return
         
-        if data == "remove_prefix":
-            self.db.update_file_prefix(user_id, '')
-            query.edit_message_text(
-                "✅ Prefix removed!",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Back", callback_data="settings")]
-                ])
-            )
+        if data == "set_password":
+            self.handle_set_password(update, context)
             return
         
+        if data == "set_thumb":
+            self.handle_set_thumb(update, context)
+            return
+        
+        if data == "remove_thumb":
+            self.handle_remove_thumb(update, context)
+            return
+        
+        # ---- UPLOAD ----
         if data == "upload":
-            self.user_sessions[user_id] = {'step': 'waiting_file'}
+            self.user_sessions[user_id] = {'step': 'waiting_file', 'files': []}
             query.edit_message_text(
                 "📤 <b>Upload Files</b>\n\n"
                 "Send any file(s) you want to store on GitHub.\n"
                 "You can send multiple files.\n\n"
-                "After uploading, click <b>✅ Done</b> to access the menu.\n\n"
+                "After uploading all files, click <b>✅ Done</b>.\n\n"
                 "Send /cancel to cancel",
                 parse_mode=ParseMode.HTML
             )
             return
         
+        # ---- DONE UPLOAD ----
+        if data == "done_upload":
+            files = self.user_sessions.get(user_id, {}).get('files', [])
+            if not files:
+                query.edit_message_text(
+                    "❌ No files uploaded yet!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
+                        [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                    ])
+                )
+                return
+            
+            # Show progress
+            query.edit_message_text(
+                f"📤 <b>Uploading {len(files)} files to GitHub...</b>\n\n"
+                f"{ProgressBar.circular(0)}\n\n"
+                f"<i>Please wait...</i>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Upload files to GitHub
+            uploaded_count = 0
+            total_files = len(files)
+            
+            for i, (file, file_name) in enumerate(files):
+                temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
+                file_obj = context.bot.get_file(file.file_id)
+                file_obj.download(temp_path)
+                
+                def progress_callback(progress, message):
+                    overall = ((i + (progress / 100)) / total_files) * 100
+                    query.edit_message_text(
+                        f"📤 <b>Uploading to GitHub...</b>\n\n"
+                        f"📄 {file_name}\n"
+                        f"{ProgressBar.circular(overall)}\n\n"
+                        f"<i>{message}</i>",
+                        parse_mode=ParseMode.HTML
+                    )
+                
+                success, result = self.github.upload_file(temp_path, file_name, user_id, progress_callback)
+                
+                if success:
+                    unique_id = secrets.token_hex(16)
+                    self.db.add_file(unique_id, user_id, file_name, file.file_size, file.file_id, result)
+                    uploaded_count += 1
+                
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            
+            # Clear session files
+            self.user_sessions[user_id] = {}
+            
+            # Show completion and ask for action
+            kb = [
+                [InlineKeyboardButton("📦 Extract All", callback_data="extract_all")],
+                [InlineKeyboardButton("🗜️ Compress All", callback_data="compress_all")],
+                [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+            ]
+            
+            query.edit_message_text(
+                f"✅ <b>Upload Complete!</b>\n\n"
+                f"📄 {uploaded_count}/{total_files} files uploaded to GitHub\n\n"
+                f"<b>What would you like to do with your files?</b>",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ---- MY FILES ----
         if data == "my_files":
             files = self.db.get_user_files(user_id)
             
@@ -543,6 +724,7 @@ class ArchiveBot:
             )
             return
         
+        # ---- DELETE FILE ----
         if data.startswith("delete_"):
             file_id = data.replace("delete_", "")
             file_data = self.db.get_file(file_id)
@@ -560,16 +742,29 @@ class ArchiveBot:
             )
             return
         
+        # ---- EXTRACT FILE ----
         if data.startswith("extract_"):
             file_id = data.replace("extract_", "")
             self.extract_file(update, context, user_id, file_id)
             return
         
+        # ---- EXTRACT ALL ----
+        if data == "extract_all":
+            self.extract_all_files(update, context, user_id)
+            return
+        
+        # ---- COMPRESS FILE ----
         if data.startswith("compress_"):
             file_id = data.replace("compress_", "")
             self.compress_file(update, context, user_id, file_id)
             return
         
+        # ---- COMPRESS ALL ----
+        if data == "compress_all":
+            self.compress_all_files(update, context, user_id)
+            return
+        
+        # ---- RENAME FILE ----
         if data.startswith("rename_"):
             file_id = data.replace("rename_", "")
             self.user_sessions[user_id] = {'step': 'waiting_rename', 'file_id': file_id}
@@ -582,6 +777,7 @@ class ArchiveBot:
             )
             return
         
+        # ---- CANCEL ----
         if data == "cancel":
             self.user_sessions.pop(user_id, None)
             query.edit_message_text(
@@ -591,6 +787,31 @@ class ArchiveBot:
                 ])
             )
             return
+
+    # ============================================
+    # SHOW MAIN MENU
+    # ============================================
+    def show_main_menu(self, update, context, user_id):
+        query = update.callback_query
+        user = self.db.get_user(user_id)
+        name = user['first_name'] if user else 'User'
+        
+        kb = [
+            [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
+            [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")]
+        ]
+        
+        query.edit_message_text(
+            f"🌟 <b>Welcome back {name}!</b>\n\n"
+            f"📤 Upload files to GitHub storage\n"
+            f"📁 Files are stored securely\n"
+            f"⚙️ Customize settings from the menu\n\n"
+            f"Choose an option:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
 
     # ============================================
     # FILE HANDLER
@@ -648,34 +869,30 @@ class ArchiveBot:
             msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
             return
         
-        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-        file_obj = context.bot.get_file(file_id)
-        file_obj.download(temp_path)
+        # Store file in session
+        if 'files' not in session:
+            session['files'] = []
+        session['files'].append((file, file_name))
         
-        success, result = self.github.upload_file(temp_path, file_name, user_id)
+        # Show file uploaded message with file list
+        file_list = ""
+        for f, name in session['files']:
+            file_list += f"• {name}\n"
         
-        if success:
-            unique_id = secrets.token_hex(16)
-            self.db.add_file(unique_id, user_id, file_name, file_size, file_id, result)
-            
-            msg.reply_text(
-                f"✅ <b>File Uploaded!</b>\n\n"
-                f"📄 {file_name}\n"
-                f"📦 {self.format_size(file_size)}\n"
-                f"🔒 Stored on GitHub\n\n"
-                f"📤 Upload more files or click the menu below.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📤 Upload More", callback_data="upload")],
-                    [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
-                    [InlineKeyboardButton("✅ Done", callback_data="back_to_menu")]
-                ]),
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            msg.reply_text(f"❌ Upload failed: {result}")
+        kb = [
+            [InlineKeyboardButton("✅ Done", callback_data="done_upload")],
+            [InlineKeyboardButton("➕ Upload More", callback_data="upload")],
+            [InlineKeyboardButton("🗑️ Clear All", callback_data="cancel")]
+        ]
         
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        msg.reply_text(
+            f"✅ <b>File uploaded!</b>\n\n"
+            f"📄 <b>Uploaded Files ({len(session['files'])}):</b>\n"
+            f"{file_list}\n\n"
+            f"Click <b>✅ Done</b> when finished uploading.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
 
     # ============================================
     # TEXT HANDLER
@@ -706,6 +923,7 @@ class ArchiveBot:
         
         session = self.user_sessions.get(user_id)
         
+        # Handle prefix
         if session and session.get('step') == 'waiting_prefix':
             self.db.update_file_prefix(user_id, text)
             self.user_sessions.pop(user_id, None)
@@ -719,6 +937,21 @@ class ArchiveBot:
             )
             return
         
+        # Handle password
+        if session and session.get('step') == 'waiting_password':
+            self.db.update_archive_password(user_id, text)
+            self.user_sessions.pop(user_id, None)
+            update.message.reply_text(
+                f"✅ Archive password set!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Handle rename
         if session and session.get('step') == 'waiting_rename':
             file_id = session.get('file_id')
             file_data = self.db.get_file(file_id)
@@ -754,10 +987,165 @@ class ArchiveBot:
             self.user_sessions.pop(user_id, None)
             return
         
+        # If not in session, treat as file upload
         self.file_handler(update, context)
 
     # ============================================
-    # EXTRACT FILE
+    # PHOTO HANDLER (for thumbnail)
+    # ============================================
+    def photo_handler(self, update: Update, context: CallbackContext):
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        session = self.user_sessions.get(user_id)
+        
+        # Check if in thumbnail upload mode
+        if session and session.get('step') == 'waiting_thumb':
+            photo = update.message.photo[-1]
+            file_obj = context.bot.get_file(photo.file_id)
+            thumb_path = os.path.join(TEMP_DIR, f"{user_id}_thumb.jpg")
+            file_obj.download(thumb_path)
+            
+            self.db.update_thumbnail(user_id, thumb_path)
+            self.user_sessions.pop(user_id, None)
+            
+            update.message.reply_text(
+                f"✅ <b>Thumbnail set successfully!</b>\n\n"
+                f"🆔 File ID: <code>{photo.file_id[:30]}...</code>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Otherwise handle as regular file upload
+        self.file_handler(update, context)
+
+    # ============================================
+    # EXTRACT ALL FILES
+    # ============================================
+    def extract_all_files(self, update, context, user_id):
+        query = update.callback_query
+        files = self.db.get_user_files(user_id)
+        
+        if not files:
+            query.edit_message_text("❌ No files to extract.")
+            return
+        
+        query.edit_message_text(f"📦 Extracting {len(files)} files...\n\n{ProgressBar.circular(0)}")
+        
+        all_extracted = []
+        
+        for idx, file_data in enumerate(files):
+            progress = ((idx + 1) / len(files)) * 100
+            query.edit_message_text(
+                f"📦 Extracting {idx+1}/{len(files)}: {file_data['name']}\n\n{ProgressBar.circular(progress)}"
+            )
+            
+            # Download from GitHub
+            temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
+            if not self.github.download_file(file_data['name'], user_id, temp_path):
+                continue
+            
+            ext = os.path.splitext(file_data['name'])[1].lower()
+            if ext not in ['.zip', '.rar', '.7z']:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                continue
+            
+            try:
+                extract_dir = os.path.join(TEMP_DIR, f"{user_id}_extracted")
+                os.makedirs(extract_dir, exist_ok=True)
+                
+                password = self.db.get_archive_password(user_id) or None
+                
+                if ext == '.zip':
+                    with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                        if password:
+                            zip_ref.setpassword(password.encode())
+                        zip_ref.extractall(extract_dir)
+                elif ext == '.rar':
+                    with rarfile.RarFile(temp_path) as rar_ref:
+                        if password:
+                            rar_ref.setpassword(password)
+                        rar_ref.extractall(extract_dir)
+                elif ext == '.7z':
+                    with py7zr.SevenZipFile(temp_path, mode='r', password=password) as sz_ref:
+                        sz_ref.extractall(extract_dir)
+                
+                for root, dirs, files_in_dir in os.walk(extract_dir):
+                    for f in files_in_dir:
+                        all_extracted.append(os.path.join(root, f))
+                        
+            except Exception as e:
+                query.edit_message_text(f"❌ Error extracting {file_data['name']}: {str(e)}")
+            
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        
+        query.edit_message_text(f"✅ Extracted {len(all_extracted)} files!\n\n{ProgressBar.circular(100)}")
+        
+        if all_extracted:
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"📤 Sending {len(all_extracted)} extracted files..."
+            )
+            
+            thumb = self.db.get_thumbnail(user_id)
+            prefix = self.db.get_file_prefix(user_id)
+            
+            for file_path in all_extracted:
+                if os.path.getsize(file_path) < MAX_FILE_SIZE:
+                    file_name = os.path.basename(file_path)
+                    if prefix:
+                        file_name = f"{prefix}{file_name}"
+                    
+                    with open(file_path, 'rb') as doc:
+                        context.bot.send_document(
+                            chat_id=query.message.chat_id,
+                            document=doc,
+                            filename=file_name,
+                            thumbnail=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
+                        )
+        
+        shutil.rmtree(os.path.join(TEMP_DIR, f"{user_id}_extracted"), ignore_errors=True)
+        
+        # Show menu
+        kb = [
+            [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+        ]
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="📤 Return to menu:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    # ============================================
+    # COMPRESS ALL FILES
+    # ============================================
+    def compress_all_files(self, update, context, user_id):
+        query = update.callback_query
+        
+        # Show compression options
+        kb = [
+            [InlineKeyboardButton("📦 ZIP", callback_data="compress_all_zip")],
+            [InlineKeyboardButton("📦 7Z", callback_data="compress_all_7z")],
+            [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
+        ]
+        
+        query.edit_message_text(
+            "🗜️ <b>Compress All Files</b>\n\n"
+            "Choose compression format:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    # ============================================
+    # EXTRACT SINGLE FILE
     # ============================================
     def extract_file(self, update, context, user_id, file_id):
         query = update.callback_query
@@ -767,7 +1155,7 @@ class ArchiveBot:
             query.edit_message_text("❌ File not found")
             return
         
-        query.edit_message_text("📦 Downloading file from GitHub...")
+        query.edit_message_text(f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(0)}")
         
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
         if not self.github.download_file(file_data['name'], user_id, temp_path):
@@ -781,11 +1169,11 @@ class ArchiveBot:
                 os.remove(temp_path)
             return
         
-        query.edit_message_text(f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(0)}")
-        
         try:
             extract_dir = os.path.join(TEMP_DIR, f"{user_id}_extracted")
             os.makedirs(extract_dir, exist_ok=True)
+            
+            password = self.db.get_archive_password(user_id) or None
             
             if ext == '.zip':
                 with zipfile.ZipFile(temp_path, 'r') as zip_ref:
@@ -795,7 +1183,7 @@ class ArchiveBot:
                         if i % 5 == 0:
                             progress = (i / total) * 100 if total > 0 else 0
                             query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                                f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(progress)}"
                             )
                             
             elif ext == '.rar':
@@ -806,11 +1194,11 @@ class ArchiveBot:
                         if i % 5 == 0:
                             progress = (i / total) * 100 if total > 0 else 0
                             query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                                f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(progress)}"
                             )
                             
             elif ext == '.7z':
-                with py7zr.SevenZipFile(temp_path, mode='r') as sz_ref:
+                with py7zr.SevenZipFile(temp_path, mode='r', password=password) as sz_ref:
                     files = sz_ref.getnames()
                     total = len(files)
                     for i, name in enumerate(files):
@@ -818,7 +1206,7 @@ class ArchiveBot:
                         if i % 2 == 0:
                             progress = (i / total) * 100 if total > 0 else 0
                             query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
+                                f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(progress)}"
                             )
             
             query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
@@ -834,13 +1222,21 @@ class ArchiveBot:
                     text=f"📤 Sending {len(extracted)} extracted files..."
                 )
                 
+                thumb = self.db.get_thumbnail(user_id)
+                prefix = self.db.get_file_prefix(user_id)
+                
                 for f_path in extracted:
                     if os.path.getsize(f_path) < MAX_FILE_SIZE:
+                        file_name = os.path.basename(f_path)
+                        if prefix:
+                            file_name = f"{prefix}{file_name}"
+                        
                         with open(f_path, 'rb') as doc:
                             context.bot.send_document(
                                 chat_id=query.message.chat_id,
                                 document=doc,
-                                filename=os.path.basename(f_path)
+                                filename=file_name,
+                                thumbnail=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
                             )
             
             shutil.rmtree(extract_dir, ignore_errors=True)
@@ -852,7 +1248,7 @@ class ArchiveBot:
             os.remove(temp_path)
 
     # ============================================
-    # COMPRESS FILE
+    # COMPRESS SINGLE FILE
     # ============================================
     def compress_file(self, update, context, user_id, file_id):
         query = update.callback_query
@@ -863,8 +1259,8 @@ class ArchiveBot:
             return
         
         kb = [
-            [InlineKeyboardButton("📦 ZIP", callback_data=f"compress_zip_{file_id}")],
-            [InlineKeyboardButton("📦 7Z", callback_data=f"compress_7z_{file_id}")],
+            [InlineKeyboardButton("📦 ZIP", callback_data=f"compress_single_zip_{file_id}")],
+            [InlineKeyboardButton("📦 7Z", callback_data=f"compress_single_7z_{file_id}")],
             [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
         ]
         
@@ -874,12 +1270,6 @@ class ArchiveBot:
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
-
-    # ============================================
-    # PHOTO HANDLER
-    # ============================================
-    def photo_handler(self, update: Update, context: CallbackContext):
-        self.file_handler(update, context)
 
     # ============================================
     # RUN BOT
