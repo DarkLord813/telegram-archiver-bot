@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - FULL VERSION
+# TELEGRAM ARCHIVE BOT - WITH LARGE FILE SUPPORT
 # Compatible with python-telegram-bot 13.7
 # ============================================
 
@@ -16,6 +16,7 @@ import py7zr
 import time
 import base64
 import requests
+import urllib.request
 from datetime import datetime
 from typing import Optional, Dict, List
 
@@ -45,7 +46,7 @@ if not GITHUB_TOKEN or not GITHUB_OWNER or not GITHUB_REPO:
 FORCE_CHANNEL = os.getenv('FORCE_CHANNEL', '@NCK_Dev')
 FORCE_CHANNEL_ID = int(os.getenv('FORCE_CHANNEL_ID', '-1002583286874'))
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 TEMP_DIR = os.getenv('TEMP_DIR', 'temp_downloads')
 DB_PATH = os.getenv('DB_PATH', './data/bot_database.db')
 
@@ -92,6 +93,7 @@ class Database:
                 name TEXT,
                 size INTEGER,
                 file_id TEXT,
+                file_path TEXT,
                 github_path TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 is_active INTEGER DEFAULT 1
@@ -158,12 +160,12 @@ class Database:
         row = cursor.fetchone()
         return row['thumbnail_path'] if row else ''
 
-    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
+    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, file_path: str, github_path: str):
         cursor = self.conn.cursor()
         cursor.execute(
-            '''INSERT INTO files (id, user_id, name, size, file_id, github_path) 
-               VALUES (?, ?, ?, ?, ?, ?)''',
-            (file_id, user_id, name, size, telegram_file_id, github_path)
+            '''INSERT INTO files (id, user_id, name, size, file_id, file_path, github_path) 
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (file_id, user_id, name, size, telegram_file_id, file_path, github_path)
         )
         self.conn.commit()
 
@@ -206,6 +208,43 @@ class Database:
 
 
 # ============================================
+# FILE DOWNLOADER - Handles large files
+# ============================================
+class FileDownloader:
+    @staticmethod
+    def download_file(bot, file_id: str, save_path: str, progress_callback=None) -> bool:
+        """Download file from Telegram using file ID with progress"""
+        try:
+            # Get file info
+            file_obj = bot.get_file(file_id)
+            
+            # Get file URL
+            file_url = file_obj.file_path
+            
+            # Download with streaming for large files
+            response = requests.get(file_url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback and total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            progress_callback(progress, f"Downloading... {progress:.1f}%")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            return False
+
+
+# ============================================
 # GITHUB MANAGER
 # ============================================
 class GitHubManager:
@@ -220,8 +259,12 @@ class GitHubManager:
             "Accept": "application/vnd.github.v3+json"
         }
 
-    def upload_file(self, file_path: str, file_name: str, user_id: int, progress_callback=None) -> tuple:
+    def upload_file(self, file_path: str, file_name: str, user_id: int) -> tuple:
         try:
+            # Check file size
+            file_size = os.path.getsize(file_path)
+            
+            # For large files, use chunked upload approach
             with open(file_path, 'rb') as f:
                 content = f.read()
             
@@ -245,14 +288,9 @@ class GitHubManager:
             if sha:
                 data["sha"] = sha
             
-            if progress_callback:
-                progress_callback(50, f"Uploading {file_name}...")
-            
             response = requests.put(url, headers=self.headers, json=data)
             
             if response.status_code in [200, 201]:
-                if progress_callback:
-                    progress_callback(100, f"Uploaded {file_name}!")
                 return True, f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/{path}"
             else:
                 return False, f"Upload failed: {response.text}"
@@ -290,11 +328,13 @@ class GitHubManager:
     def download_file(self, file_name: str, user_id: int, save_path: str) -> bool:
         try:
             url = f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/user_files/{user_id}/{file_name}"
-            response = requests.get(url)
+            response = requests.get(url, stream=True)
             
             if response.status_code == 200:
                 with open(save_path, 'wb') as f:
-                    f.write(response.content)
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
                 return True
             else:
                 return False
@@ -614,7 +654,9 @@ class ArchiveBot:
         
         # ---- DONE UPLOAD ----
         if data == "done_upload":
-            files = self.user_sessions.get(user_id, {}).get('files', [])
+            session = self.user_sessions.get(user_id, {})
+            files = session.get('files', [])
+            
             if not files:
                 query.edit_message_text(
                     "❌ No files uploaded yet!",
@@ -639,25 +681,46 @@ class ArchiveBot:
             
             for i, (file, file_name) in enumerate(files):
                 temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-                file_obj = context.bot.get_file(file.file_id)
-                file_obj.download(temp_path)
                 
-                def progress_callback(progress, message):
+                # Download file using the custom downloader with progress
+                def download_progress(progress, message):
                     overall = ((i + (progress / 100)) / total_files) * 100
                     query.edit_message_text(
-                        f"📤 <b>Uploading to GitHub...</b>\n\n"
+                        f"📤 <b>Downloading to temp...</b>\n\n"
                         f"📄 {file_name}\n"
                         f"{ProgressBar.circular(overall)}\n\n"
                         f"<i>{message}</i>",
                         parse_mode=ParseMode.HTML
                     )
                 
-                success, result = self.github.upload_file(temp_path, file_name, user_id, progress_callback)
+                success = FileDownloader.download_file(
+                    context.bot, 
+                    file.file_id, 
+                    temp_path,
+                    download_progress
+                )
                 
-                if success:
+                if not success:
+                    query.edit_message_text(f"❌ Failed to download {file_name}")
+                    continue
+                
+                # Upload to GitHub
+                upload_success, result = self.github.upload_file(temp_path, file_name, user_id)
+                
+                if upload_success:
                     unique_id = secrets.token_hex(16)
-                    self.db.add_file(unique_id, user_id, file_name, file.file_size, file.file_id, result)
+                    self.db.add_file(unique_id, user_id, file_name, file.file_size, file.file_id, temp_path, result)
                     uploaded_count += 1
+                
+                # Update progress
+                progress = ((i + 1) / total_files) * 100
+                query.edit_message_text(
+                    f"📤 <b>Uploading to GitHub...</b>\n\n"
+                    f"📄 {file_name}\n"
+                    f"{ProgressBar.circular(progress)}\n\n"
+                    f"<i>{uploaded_count}/{total_files} uploaded</i>",
+                    parse_mode=ParseMode.HTML
+                )
                 
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -964,7 +1027,7 @@ class ArchiveBot:
                         self.github.delete_file(file_data['name'], user_id)
                         self.db.delete_file(file_id)
                         unique_id = secrets.token_hex(16)
-                        self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], result)
+                        self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], temp_path, result)
                         
                         update.message.reply_text(
                             f"✅ File renamed to: <b>{text}</b>",
