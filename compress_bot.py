@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - WITH LARGE FILE SUPPORT
+# TELEGRAM ARCHIVE BOT - DIRECT GITHUB UPLOAD
 # Compatible with python-telegram-bot 13.7
 # ============================================
 
@@ -93,7 +93,6 @@ class Database:
                 name TEXT,
                 size INTEGER,
                 file_id TEXT,
-                file_path TEXT,
                 github_path TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 is_active INTEGER DEFAULT 1
@@ -160,12 +159,12 @@ class Database:
         row = cursor.fetchone()
         return row['thumbnail_path'] if row else ''
 
-    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, file_path: str, github_path: str):
+    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
         cursor = self.conn.cursor()
         cursor.execute(
-            '''INSERT INTO files (id, user_id, name, size, file_id, file_path, github_path) 
-               VALUES (?, ?, ?, ?, ?, ?, ?)''',
-            (file_id, user_id, name, size, telegram_file_id, file_path, github_path)
+            '''INSERT INTO files (id, user_id, name, size, file_id, github_path) 
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (file_id, user_id, name, size, telegram_file_id, github_path)
         )
         self.conn.commit()
 
@@ -194,152 +193,98 @@ class Database:
         )
         self.conn.commit()
 
-    def clear_user_files(self, user_id: int):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'UPDATE files SET is_active = 0 WHERE user_id = ?',
-            (user_id,)
-        )
-        self.conn.commit()
-
     def close(self):
         if self.conn:
             self.conn.close()
 
 
 # ============================================
-# FILE DOWNLOADER - Handles large files
+# TELEGRAM TO GITHUB DIRECT UPLOADER
 # ============================================
-class FileDownloader:
+class TelegramToGitHubUploader:
     @staticmethod
-    def download_file(bot, file_id: str, save_path: str, progress_callback=None) -> bool:
-        """Download file from Telegram using file ID with progress"""
+    def upload_file_directly(bot_token: str, file_id: str, github_token: str, github_owner: str, 
+                           github_repo: str, github_branch: str, file_name: str, user_id: int,
+                           progress_callback=None) -> tuple:
+        """Upload file directly from Telegram to GitHub without saving locally"""
         try:
-            # Get file info
-            file_obj = bot.get_file(file_id)
+            # Step 1: Get file info from Telegram
+            telegram_url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
+            response = requests.get(telegram_url)
+            response.raise_for_status()
+            file_info = response.json()
             
-            # Get file URL
-            file_url = file_obj.file_path
+            if not file_info.get('ok'):
+                return False, f"Failed to get file info: {file_info}"
             
-            # Download with streaming for large files
-            response = requests.get(file_url, stream=True)
+            file_path = file_info['result']['file_path']
+            download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+            
+            if progress_callback:
+                progress_callback(20, "Fetching file from Telegram...")
+            
+            # Step 2: Stream download from Telegram
+            response = requests.get(download_url, stream=True)
             response.raise_for_status()
             
+            # Step 3: Get total size for progress
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             
-            with open(save_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if progress_callback and total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            progress_callback(progress, f"Downloading... {progress:.1f}%")
+            # Step 4: Read content in chunks and encode for GitHub
+            content_parts = []
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    content_parts.append(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total_size > 0:
+                        progress = 20 + (downloaded / total_size) * 60
+                        progress_callback(progress, f"Downloading... {progress:.1f}%")
             
-            return True
-            
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return False
-
-
-# ============================================
-# GITHUB MANAGER
-# ============================================
-class GitHubManager:
-    def __init__(self, token: str, owner: str, repo: str, branch: str = 'main'):
-        self.token = token
-        self.owner = owner
-        self.repo = repo
-        self.branch = branch
-        self.base_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
-        self.headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-
-    def upload_file(self, file_path: str, file_name: str, user_id: int) -> tuple:
-        try:
-            # Check file size
-            file_size = os.path.getsize(file_path)
-            
-            # For large files, use chunked upload approach
-            with open(file_path, 'rb') as f:
-                content = f.read()
-            
+            content = b''.join(content_parts)
             encoded = base64.b64encode(content).decode('utf-8')
-            path = f"user_files/{user_id}/{file_name}"
-            url = f"{self.base_url}/{path}"
             
+            if progress_callback:
+                progress_callback(80, "Uploading to GitHub...")
+            
+            # Step 5: Upload to GitHub
+            github_path = f"user_files/{user_id}/{file_name}"
+            github_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/contents/{github_path}"
+            
+            headers = {
+                "Authorization": f"token {github_token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            # Check if file exists
             sha = None
             try:
-                response = requests.get(url, headers=self.headers)
-                if response.status_code == 200:
-                    sha = response.json().get('sha')
+                check_response = requests.get(github_url, headers=headers)
+                if check_response.status_code == 200:
+                    sha = check_response.json().get('sha')
             except:
                 pass
             
             data = {
                 "message": f"Upload {file_name} by user {user_id}",
                 "content": encoded,
-                "branch": self.branch
+                "branch": github_branch
             }
             if sha:
                 data["sha"] = sha
             
-            response = requests.put(url, headers=self.headers, json=data)
+            upload_response = requests.put(github_url, headers=headers, json=data)
             
-            if response.status_code in [200, 201]:
-                return True, f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/{path}"
+            if upload_response.status_code in [200, 201]:
+                if progress_callback:
+                    progress_callback(100, "Upload complete!")
+                return True, f"https://raw.githubusercontent.com/{github_owner}/{github_repo}/{github_branch}/{github_path}"
             else:
-                return False, f"Upload failed: {response.text}"
+                return False, f"GitHub upload failed: {upload_response.text}"
                 
         except Exception as e:
+            logger.error(f"Upload error: {e}")
             return False, str(e)
-
-    def delete_file(self, file_name: str, user_id: int) -> tuple:
-        try:
-            path = f"user_files/{user_id}/{file_name}"
-            url = f"{self.base_url}/{path}"
-            
-            response = requests.get(url, headers=self.headers)
-            if response.status_code != 200:
-                return False, "File not found"
-            
-            sha = response.json().get('sha')
-            
-            data = {
-                "message": f"Delete {file_name} by user {user_id}",
-                "sha": sha,
-                "branch": self.branch
-            }
-            
-            response = requests.delete(url, headers=self.headers, json=data)
-            
-            if response.status_code in [200, 204]:
-                return True, "File deleted"
-            else:
-                return False, f"Delete failed: {response.text}"
-                
-        except Exception as e:
-            return False, str(e)
-
-    def download_file(self, file_name: str, user_id: int, save_path: str) -> bool:
-        try:
-            url = f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{self.branch}/user_files/{user_id}/{file_name}"
-            response = requests.get(url, stream=True)
-            
-            if response.status_code == 200:
-                with open(save_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                return True
-            else:
-                return False
-        except:
-            return False
 
 
 # ============================================
@@ -371,7 +316,6 @@ class ProgressBar:
 class ArchiveBot:
     def __init__(self):
         self.db = Database()
-        self.github = GitHubManager(GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
         self.bot_username = ''
         self.bot_id = 0
         self.user_sessions = {}
@@ -438,7 +382,7 @@ class ArchiveBot:
         
         update.message.reply_text(
             f"🌟 <b>Welcome {user.first_name}!</b>\n\n"
-            f"📤 Upload files to GitHub storage\n"
+            f"📤 Upload files directly to GitHub\n"
             f"📁 Files are stored securely\n"
             f"⚙️ Customize settings from the menu\n\n"
             f"Choose an option:",
@@ -593,7 +537,7 @@ class ArchiveBot:
         if data == "help":
             query.edit_message_text(
                 "❓ <b>Help</b>\n\n"
-                "📤 <b>Upload Files</b>: Send files to store on GitHub\n"
+                "📤 <b>Upload Files</b>: Send files directly to GitHub\n"
                 "📋 <b>My Files</b>: View and manage your files\n"
                 "⚙️ <b>Settings</b>: Customize your preferences\n\n"
                 "<b>Settings:</b>\n"
@@ -675,55 +619,41 @@ class ArchiveBot:
                 parse_mode=ParseMode.HTML
             )
             
-            # Upload files to GitHub
+            # Upload files directly to GitHub
             uploaded_count = 0
             total_files = len(files)
             
             for i, (file, file_name) in enumerate(files):
-                temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-                
-                # Download file using the custom downloader with progress
-                def download_progress(progress, message):
+                # Show progress
+                def upload_progress(progress, message):
                     overall = ((i + (progress / 100)) / total_files) * 100
                     query.edit_message_text(
-                        f"📤 <b>Downloading to temp...</b>\n\n"
+                        f"📤 <b>Uploading to GitHub...</b>\n\n"
                         f"📄 {file_name}\n"
                         f"{ProgressBar.circular(overall)}\n\n"
                         f"<i>{message}</i>",
                         parse_mode=ParseMode.HTML
                     )
                 
-                success = FileDownloader.download_file(
-                    context.bot, 
-                    file.file_id, 
-                    temp_path,
-                    download_progress
+                # Upload directly from Telegram to GitHub
+                success, result = TelegramToGitHubUploader.upload_file_directly(
+                    BOT_TOKEN,
+                    file.file_id,
+                    GITHUB_TOKEN,
+                    GITHUB_OWNER,
+                    GITHUB_REPO,
+                    GITHUB_BRANCH,
+                    file_name,
+                    user_id,
+                    upload_progress
                 )
                 
-                if not success:
-                    query.edit_message_text(f"❌ Failed to download {file_name}")
-                    continue
-                
-                # Upload to GitHub
-                upload_success, result = self.github.upload_file(temp_path, file_name, user_id)
-                
-                if upload_success:
+                if success:
                     unique_id = secrets.token_hex(16)
-                    self.db.add_file(unique_id, user_id, file_name, file.file_size, file.file_id, temp_path, result)
+                    self.db.add_file(unique_id, user_id, file_name, file.file_size, file.file_id, result)
                     uploaded_count += 1
-                
-                # Update progress
-                progress = ((i + 1) / total_files) * 100
-                query.edit_message_text(
-                    f"📤 <b>Uploading to GitHub...</b>\n\n"
-                    f"📄 {file_name}\n"
-                    f"{ProgressBar.circular(progress)}\n\n"
-                    f"<i>{uploaded_count}/{total_files} uploaded</i>",
-                    parse_mode=ParseMode.HTML
-                )
-                
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                else:
+                    query.edit_message_text(f"❌ Failed to upload {file_name}: {result}")
             
             # Clear session files
             self.user_sessions[user_id] = {}
@@ -793,7 +723,28 @@ class ArchiveBot:
             file_data = self.db.get_file(file_id)
             
             if file_data:
-                self.github.delete_file(file_data['name'], user_id)
+                # Delete from GitHub
+                github_path = f"user_files/{user_id}/{file_data['name']}"
+                github_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{github_path}"
+                headers = {
+                    "Authorization": f"token {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github.v3+json"
+                }
+                
+                # Get SHA
+                try:
+                    check_response = requests.get(github_url, headers=headers)
+                    if check_response.status_code == 200:
+                        sha = check_response.json().get('sha')
+                        delete_data = {
+                            "message": f"Delete {file_data['name']} by user {user_id}",
+                            "sha": sha,
+                            "branch": GITHUB_BRANCH
+                        }
+                        requests.delete(github_url, headers=headers, json=delete_data)
+                except:
+                    pass
+                
                 self.db.delete_file(file_id)
             
             query.edit_message_text(
@@ -868,7 +819,7 @@ class ArchiveBot:
         
         query.edit_message_text(
             f"🌟 <b>Welcome back {name}!</b>\n\n"
-            f"📤 Upload files to GitHub storage\n"
+            f"📤 Upload files directly to GitHub\n"
             f"📁 Files are stored securely\n"
             f"⚙️ Customize settings from the menu\n\n"
             f"Choose an option:",
@@ -1020,14 +971,59 @@ class ArchiveBot:
             file_data = self.db.get_file(file_id)
             
             if file_data:
-                temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
-                if self.github.download_file(file_data['name'], user_id, temp_path):
-                    success, result = self.github.upload_file(temp_path, text, user_id)
-                    if success:
-                        self.github.delete_file(file_data['name'], user_id)
+                # Download from GitHub
+                github_path = f"user_files/{user_id}/{file_data['name']}"
+                github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+                response = requests.get(github_url)
+                
+                if response.status_code == 200:
+                    content = response.content
+                    encoded = base64.b64encode(content).decode('utf-8')
+                    
+                    # Upload with new name
+                    new_path = f"user_files/{user_id}/{text}"
+                    new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
+                    headers = {
+                        "Authorization": f"token {GITHUB_TOKEN}",
+                        "Accept": "application/vnd.github.v3+json"
+                    }
+                    
+                    # Check if exists
+                    sha = None
+                    try:
+                        check_response = requests.get(new_url, headers=headers)
+                        if check_response.status_code == 200:
+                            sha = check_response.json().get('sha')
+                    except:
+                        pass
+                    
+                    data = {
+                        "message": f"Rename {file_data['name']} to {text} by user {user_id}",
+                        "content": encoded,
+                        "branch": GITHUB_BRANCH
+                    }
+                    if sha:
+                        data["sha"] = sha
+                    
+                    upload_response = requests.put(new_url, headers=headers, json=data)
+                    
+                    if upload_response.status_code in [200, 201]:
+                        # Delete old file
+                        old_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{github_path}"
+                        check_response = requests.get(old_url, headers=headers)
+                        if check_response.status_code == 200:
+                            old_sha = check_response.json().get('sha')
+                            delete_data = {
+                                "message": f"Delete {file_data['name']} by user {user_id}",
+                                "sha": old_sha,
+                                "branch": GITHUB_BRANCH
+                            }
+                            requests.delete(old_url, headers=headers, json=delete_data)
+                        
+                        # Update database
                         self.db.delete_file(file_id)
                         unique_id = secrets.token_hex(16)
-                        self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], temp_path, result)
+                        self.db.add_file(unique_id, user_id, text, file_data['size'], file_data['file_id'], new_url)
                         
                         update.message.reply_text(
                             f"✅ File renamed to: <b>{text}</b>",
@@ -1039,9 +1035,6 @@ class ArchiveBot:
                         )
                     else:
                         update.message.reply_text(f"❌ Rename failed")
-                    
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
                 else:
                     update.message.reply_text("❌ Could not download file from GitHub")
             else:
@@ -1109,9 +1102,16 @@ class ArchiveBot:
             )
             
             # Download from GitHub
-            temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
-            if not self.github.download_file(file_data['name'], user_id, temp_path):
+            github_path = f"user_files/{user_id}/{file_data['name']}"
+            github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+            response = requests.get(github_url)
+            
+            if response.status_code != 200:
                 continue
+            
+            temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
+            with open(temp_path, 'wb') as f:
+                f.write(response.content)
             
             ext = os.path.splitext(file_data['name'])[1].lower()
             if ext not in ['.zip', '.rar', '.7z']:
@@ -1220,10 +1220,18 @@ class ArchiveBot:
         
         query.edit_message_text(f"📦 Extracting {file_data['name']}...\n\n{ProgressBar.circular(0)}")
         
-        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
-        if not self.github.download_file(file_data['name'], user_id, temp_path):
+        # Download from GitHub
+        github_path = f"user_files/{user_id}/{file_data['name']}"
+        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+        response = requests.get(github_url)
+        
+        if response.status_code != 200:
             query.edit_message_text("❌ Could not download file from GitHub")
             return
+        
+        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
+        with open(temp_path, 'wb') as f:
+            f.write(response.content)
         
         ext = os.path.splitext(file_data['name'])[1].lower()
         if ext not in ['.zip', '.rar', '.7z']:
