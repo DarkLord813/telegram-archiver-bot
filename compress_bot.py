@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - WORKING VERSION
+# TELEGRAM ARCHIVE BOT - FIXED VERSION
 # Compatible with python-telegram-bot 13.7
 # ============================================
 
@@ -315,11 +315,23 @@ class ArchiveBot:
             [InlineKeyboardButton("🔄 Check Again", callback_data="check_join")]
         ])
 
+    def get_user_id(self, update: Update) -> Optional[int]:
+        """Safely get user ID from update"""
+        if update.effective_user:
+            return update.effective_user.id
+        elif update.callback_query and update.callback_query.from_user:
+            return update.callback_query.from_user.id
+        elif update.message and update.message.from_user:
+            return update.message.from_user.id
+        return None
+
     # ============================================
     # START COMMAND
     # ============================================
     def start_command(self, update: Update, context: CallbackContext):
-        user_id = update.effective_user.id
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
         
         if not self.check_force_join(context, user_id):
             update.message.reply_text(
@@ -360,7 +372,10 @@ class ArchiveBot:
         query = update.callback_query
         query.answer()
         
-        user_id = query.from_user.id
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
         data = query.data
         
         if data != "check_join" and not self.check_force_join(context, user_id):
@@ -581,7 +596,10 @@ class ArchiveBot:
     # FILE HANDLER
     # ============================================
     def file_handler(self, update: Update, context: CallbackContext):
-        user_id = update.effective_user.id
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
         msg = update.message
         
         if not self.check_force_join(context, user_id):
@@ -663,7 +681,10 @@ class ArchiveBot:
     # TEXT HANDLER
     # ============================================
     def text_handler(self, update: Update, context: CallbackContext):
-        user_id = update.effective_user.id
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
         text = update.message.text
         
         if not self.check_force_join(context, user_id):
