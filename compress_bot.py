@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - INDIVIDUAL & MULTIPLE FILES
+# TELEGRAM ARCHIVE BOT - FULLY FIXED
 # All data stored in GitHub - Auto-delete after send
 # ============================================
 
@@ -852,6 +852,20 @@ class ArchiveBot:
             self.compress_all_files(update, context, user_id)
             return
         
+        # ---- COMPRESS ALL WITH FORMAT ----
+        if data.startswith("compress_all_"):
+            format_type = data.replace("compress_all_", "")
+            self.compress_all_with_format(update, context, user_id, format_type)
+            return
+        
+        # ---- COMPRESS SINGLE WITH FORMAT ----
+        if data.startswith("compress_single_"):
+            parts = data.split("_")
+            format_type = parts[2]  # compress_single_zip_{file_id}
+            file_id = parts[3]
+            self.compress_single_with_format(update, context, user_id, file_id, format_type)
+            return
+        
         # ---- RENAME FILE ----
         if data.startswith("rename_"):
             file_id = data.replace("rename_", "")
@@ -1434,6 +1448,16 @@ class ArchiveBot:
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
+
+    # ============================================
+    # COMPRESS SINGLE WITH FORMAT
+    # ============================================
+    def compress_single_with_format(self, update, context, user_id, file_id, format_type):
+        file_data = self.github_data.get_file(user_id, file_id)
+        if not file_data:
+            update.callback_query.edit_message_text("❌ File not found")
+            return
+        self.compress_and_send(update, context, user_id, file_data, format_type)
 
     # ============================================
     # COMPRESS ALL FILES
