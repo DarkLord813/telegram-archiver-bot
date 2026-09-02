@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - COMPLETE FILE MANAGEMENT
+# TELEGRAM ARCHIVE BOT - FULLY FIXED
 # All data stored in GitHub - Auto-delete after send
 # ============================================
 
@@ -219,6 +219,7 @@ class GitHubDataManager:
         return []
 
     def get_file(self, user_id: int, file_id: str) -> Optional[Dict]:
+        """Get a specific file by ID from user's files"""
         files = self.get_user_files(user_id)
         for f in files:
             if f.get('id') == file_id:
@@ -237,13 +238,6 @@ class GitHubDataManager:
                 )
                 return True
         return False
-
-    def clear_user_files(self, user_id: int):
-        self._update_file(
-            f"data/files/{user_id}.json",
-            {"files": []},
-            f"Clear all files for user {user_id}"
-        )
 
     def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
         """Delete actual file from GitHub storage"""
