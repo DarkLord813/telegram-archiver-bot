@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - FULLY FIXED
+# TELEGRAM ARCHIVE BOT - INDIVIDUAL & MULTIPLE FILES
 # All data stored in GitHub - Auto-delete after send
 # ============================================
 
@@ -224,7 +224,6 @@ class GitHubDataManager:
         return []
 
     def get_file(self, user_id: int, file_id: str) -> Optional[Dict]:
-        """Get a specific file by ID from user's files"""
         files = self.get_user_files(user_id)
         for f in files:
             if f.get('id') == file_id:
@@ -584,7 +583,7 @@ class ArchiveBot:
         )
 
     # ============================================
-    # CALLBACK HANDLER
+    # CALLBACK HANDLER - FIXED
     # ============================================
     def callback_handler(self, update: Update, context: CallbackContext):
         query = update.callback_query
@@ -640,8 +639,8 @@ class ArchiveBot:
                 "🔑 Archive Password: Protect archives\n"
                 "🖼️ Thumbnail: Set custom thumbnail\n\n"
                 "<b>File Actions:</b>\n"
-                "📦 Extract: Unpack ZIP/RAR/7z\n"
-                "🗜️ Compress: Create ZIP/7z\n"
+                "📦 Extract: Unpack ZIP/RAR/7z (single or all)\n"
+                "🗜️ Compress: Create ZIP/7z (single or all)\n"
                 "✏️ Rename: Rename & send files\n"
                 "🗑️ Delete: Remove from storage\n\n"
                 f"📢 Required Channel: {FORCE_CHANNEL}",
@@ -813,6 +812,7 @@ class ArchiveBot:
             )
             return
         
+        # ---- DELETE FILE ----
         if data.startswith("delete_"):
             file_id = data.replace("delete_", "")
             file_data = self.github_data.get_file(user_id, file_id)
@@ -830,24 +830,29 @@ class ArchiveBot:
             )
             return
         
-        if data.startswith("extract_"):
+        # ---- EXTRACT SINGLE FILE ----
+        if data.startswith("extract_") and data != "extract_all":
             file_id = data.replace("extract_", "")
             self.extract_file(update, context, user_id, file_id)
             return
         
+        # ---- EXTRACT ALL FILES ----
         if data == "extract_all":
             self.extract_all_files(update, context, user_id)
             return
         
-        if data.startswith("compress_"):
+        # ---- COMPRESS SINGLE FILE ----
+        if data.startswith("compress_") and data != "compress_all":
             file_id = data.replace("compress_", "")
             self.compress_file(update, context, user_id, file_id)
             return
         
+        # ---- COMPRESS ALL FILES ----
         if data == "compress_all":
             self.compress_all_files(update, context, user_id)
             return
         
+        # ---- RENAME FILE ----
         if data.startswith("rename_"):
             file_id = data.replace("rename_", "")
             session = self.get_session(user_id)
@@ -958,13 +963,11 @@ class ArchiveBot:
             msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
             return
         
-        # Store ONLY serializable data in session
         if 'files' not in session:
             session['files'] = []
         session['files'].append((file_id, file_name, file_size))
         self.save_session(user_id, session)
         
-        # Show file uploaded message with file list
         file_list = ""
         for _, name, size in session['files']:
             file_list += f"• {name} ({self.format_size(size)})\n"
@@ -1029,9 +1032,6 @@ class ArchiveBot:
             )
             return
         
-        # ============================================
-        # RENAME - Download, Rename, Send, Delete
-        # ============================================
         if session and session.get('step') == 'waiting_rename':
             file_id = session.get('rename_file_id')
             file_data = self.github_data.get_file(user_id, file_id)
@@ -1044,7 +1044,6 @@ class ArchiveBot:
             new_name = text
             old_name = file_data['name']
             
-            # Show progress
             msg = update.message.reply_text(
                 f"✏️ <b>Renaming file...</b>\n\n"
                 f"📄 {old_name} → {new_name}\n"
@@ -1053,7 +1052,6 @@ class ArchiveBot:
             )
             
             try:
-                # Step 1: Download from GitHub
                 github_path = f"user_files/{user_id}/{old_name}"
                 github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
                 response = requests.get(github_url)
@@ -1071,15 +1069,6 @@ class ArchiveBot:
                 )
                 
                 content = response.content
-                
-                # Step 2: Upload with new name to GitHub (temporary)
-                msg.edit_text(
-                    f"✏️ <b>Renaming file...</b>\n\n"
-                    f"📄 Uploading renamed file...\n"
-                    f"{ProgressBar.circular(60)}",
-                    parse_mode=ParseMode.HTML
-                )
-                
                 encoded = base64.b64encode(content).decode('utf-8')
                 new_path = f"user_files/{user_id}/{new_name}"
                 new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
@@ -1088,7 +1077,6 @@ class ArchiveBot:
                     "Accept": "application/vnd.github.v3+json"
                 }
                 
-                # Check if new name already exists
                 sha = None
                 try:
                     check_response = requests.get(new_url, headers=headers)
@@ -1112,7 +1100,6 @@ class ArchiveBot:
                     self.clear_session(user_id)
                     return
                 
-                # Step 3: Delete old file from GitHub
                 msg.edit_text(
                     f"✏️ <b>Renaming file...</b>\n\n"
                     f"📄 Deleting old file...\n"
@@ -1121,8 +1108,6 @@ class ArchiveBot:
                 )
                 
                 self.github_data.delete_file_from_github(user_id, old_name)
-                
-                # Step 4: Update database
                 self.github_data.delete_user_file(user_id, file_id)
                 self.github_data.add_file(
                     secrets.token_hex(16),
@@ -1133,7 +1118,6 @@ class ArchiveBot:
                     new_url
                 )
                 
-                # Step 5: Download renamed file and send to user
                 msg.edit_text(
                     f"✏️ <b>Renaming file...</b>\n\n"
                     f"📄 Sending renamed file...\n"
@@ -1141,7 +1125,6 @@ class ArchiveBot:
                     parse_mode=ParseMode.HTML
                 )
                 
-                # Download the renamed file
                 download_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{new_path}"
                 download_response = requests.get(download_url)
                 
@@ -1150,7 +1133,6 @@ class ArchiveBot:
                     with open(temp_path, 'wb') as f:
                         f.write(download_response.content)
                     
-                    # Send the file to user
                     with open(temp_path, 'rb') as doc:
                         context.bot.send_document(
                             chat_id=update.message.chat_id,
@@ -1160,11 +1142,9 @@ class ArchiveBot:
                             parse_mode=ParseMode.HTML
                         )
                     
-                    # Cleanup temp file
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
                     
-                    # Step 6: Delete from GitHub after sending
                     msg.edit_text(
                         f"✏️ <b>Renaming file...</b>\n\n"
                         f"📄 Deleting from GitHub...\n"
@@ -1174,7 +1154,6 @@ class ArchiveBot:
                     
                     self.github_data.delete_file_from_github(user_id, new_name)
                     
-                    # Update database (remove the renamed file since it's been sent and deleted)
                     files = self.github_data.get_user_files(user_id)
                     for f in files:
                         if f.get('name') == new_name:
@@ -1240,7 +1219,6 @@ class ArchiveBot:
         
         query.edit_message_text(f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(0)}")
         
-        # Download from GitHub
         github_path = f"user_files/{user_id}/{file_name}"
         github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
         response = requests.get(github_url)
@@ -1342,7 +1320,6 @@ class ArchiveBot:
         if os.path.exists(temp_path):
             os.remove(temp_path)
         
-        # DELETE FILE FROM GITHUB AFTER SENDING
         self.github_data.delete_file_from_github(user_id, file_name)
         self.github_data.delete_user_file(user_id, file_data['id'])
 
@@ -1381,7 +1358,6 @@ class ArchiveBot:
         
         query.edit_message_text(f"🗜️ Compressing {file_name} to {format_type.upper()}...\n\n{ProgressBar.circular(0)}")
         
-        # Download from GitHub
         github_path = f"user_files/{user_id}/{file_name}"
         github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
         response = requests.get(github_url)
@@ -1394,7 +1370,6 @@ class ArchiveBot:
         with open(temp_path, 'wb') as f:
             f.write(response.content)
         
-        # Create archive
         base_name = os.path.splitext(file_name)[0]
         archive_name = f"{base_name}.{format_type}"
         archive_path = os.path.join(TEMP_DIR, f"{user_id}_{archive_name}")
@@ -1412,7 +1387,6 @@ class ArchiveBot:
                 with py7zr.SevenZipFile(archive_path, 'w', password=password) as szf:
                     szf.write(temp_path, os.path.basename(file_name))
             
-            # Send compressed file
             prefix = self.github_data.get_user_field(user_id, 'file_prefix')
             if prefix:
                 archive_name = f"{prefix}{archive_name}"
@@ -1429,13 +1403,11 @@ class ArchiveBot:
         except Exception as e:
             query.edit_message_text(f"❌ Compression error: {str(e)}")
         
-        # Cleanup temp files
         if os.path.exists(temp_path):
             os.remove(temp_path)
         if os.path.exists(archive_path):
             os.remove(archive_path)
         
-        # DELETE ORIGINAL FILE FROM GITHUB AFTER SENDING
         self.github_data.delete_file_from_github(user_id, file_name)
         self.github_data.delete_user_file(user_id, file_data['id'])
 
@@ -1481,6 +1453,22 @@ class ArchiveBot:
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
+
+    # ============================================
+    # COMPRESS ALL WITH FORMAT
+    # ============================================
+    def compress_all_with_format(self, update, context, user_id, format_type):
+        query = update.callback_query
+        files = self.github_data.get_user_files(user_id)
+        
+        if not files:
+            query.edit_message_text("❌ No files to compress.")
+            return
+        
+        for file_data in files:
+            self.compress_and_send(update, context, user_id, file_data, format_type)
+        
+        query.edit_message_text("✅ All files compressed and sent!")
 
     # ============================================
     # RUN BOT
