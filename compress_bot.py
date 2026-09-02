@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - COMPLETE FILE MANAGEMENT
+# TELEGRAM ARCHIVE BOT - FULLY FIXED
 # All data stored in GitHub - Auto-delete after send
 # ============================================
 
@@ -82,7 +82,8 @@ class GitHubDataManager:
                     decoded = base64.b64decode(content['content']).decode('utf-8')
                     return json.loads(decoded)
             return None
-        except:
+        except Exception as e:
+            logger.error(f"Error getting file content from {path}: {e}")
             return None
 
     def _update_file(self, path: str, data: dict, message: str) -> bool:
@@ -211,18 +212,25 @@ class GitHubDataManager:
             {"files": user_files},
             f"Add file {name} for user {user_id}"
         )
+        logger.info(f"Added file: {name} (ID: {file_id}) for user {user_id}")
 
     def get_user_files(self, user_id: int) -> List[Dict]:
         data = self._get_file_content(f"data/files/{user_id}.json")
         if data and data.get('files'):
-            return [f for f in data['files'] if f.get('is_active', 1) == 1]
+            active_files = [f for f in data['files'] if f.get('is_active', 1) == 1]
+            logger.info(f"Found {len(active_files)} active files for user {user_id}")
+            return active_files
+        logger.info(f"No files found for user {user_id}")
         return []
 
     def get_file(self, user_id: int, file_id: str) -> Optional[Dict]:
+        """Get a specific file by ID from user's files"""
         files = self.get_user_files(user_id)
         for f in files:
             if f.get('id') == file_id:
+                logger.info(f"Found file: {f.get('name')} (ID: {file_id}) for user {user_id}")
                 return f
+        logger.warning(f"File not found: {file_id} for user {user_id}")
         return None
 
     def delete_user_file(self, user_id: int, file_id: str):
@@ -235,12 +243,18 @@ class GitHubDataManager:
                     {"files": user_files},
                     f"Delete file {file_id} for user {user_id}"
                 )
+                logger.info(f"Deleted file: {f.get('name')} (ID: {file_id}) for user {user_id}")
                 return True
         return False
 
     def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
         path = f"user_files/{user_id}/{file_name}"
-        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
+        result = self._delete_file(path, f"Delete {file_name} by user {user_id}")
+        if result:
+            logger.info(f"Deleted file from GitHub: {file_name} for user {user_id}")
+        else:
+            logger.warning(f"Failed to delete file from GitHub: {file_name} for user {user_id}")
+        return result
 
 
 # ============================================
@@ -319,6 +333,7 @@ class FastGitHubUploader:
             if upload_response.status_code in [200, 201]:
                 if progress_callback:
                     progress_callback(100, "Upload complete!")
+                logger.info(f"Uploaded file: {file_name} for user {user_id}")
                 return True, f"https://raw.githubusercontent.com/{github_owner}/{github_repo}/{github_branch}/{github_path}"
             else:
                 return False, f"GitHub upload failed: {upload_response.text}"
