@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - FULLY FIXED
+# TELEGRAM ARCHIVE BOT - COMPLETE FILE MANAGEMENT
 # All data stored in GitHub - Auto-delete after send
 # ============================================
 
@@ -219,7 +219,6 @@ class GitHubDataManager:
         return []
 
     def get_file(self, user_id: int, file_id: str) -> Optional[Dict]:
-        """Get a specific file by ID from user's files"""
         files = self.get_user_files(user_id)
         for f in files:
             if f.get('id') == file_id:
@@ -240,7 +239,6 @@ class GitHubDataManager:
         return False
 
     def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
-        """Delete actual file from GitHub storage"""
         path = f"user_files/{user_id}/{file_name}"
         return self._delete_file(path, f"Delete {file_name} by user {user_id}")
 
@@ -629,7 +627,7 @@ class ArchiveBot:
                 "<b>File Actions:</b>\n"
                 "📦 Extract: Unpack ZIP/RAR/7z\n"
                 "🗜️ Compress: Create ZIP/7z\n"
-                "✏️ Rename: Rename files\n"
+                "✏️ Rename: Rename & send files\n"
                 "🗑️ Delete: Remove from storage\n\n"
                 f"📢 Required Channel: {FORCE_CHANNEL}",
                 reply_markup=InlineKeyboardMarkup([
@@ -805,9 +803,7 @@ class ArchiveBot:
             file_data = self.github_data.get_file(user_id, file_id)
             
             if file_data:
-                # Delete from GitHub storage
                 self.github_data.delete_file_from_github(user_id, file_data['name'])
-                # Remove from database
                 self.github_data.delete_user_file(user_id, file_id)
             
             query.edit_message_text(
@@ -849,7 +845,8 @@ class ArchiveBot:
             query.edit_message_text(
                 f"✏️ <b>Rename File</b>\n\n"
                 f"Send the new name for this file.\n"
-                f"Example: <code>new_name.txt</code>",
+                f"Example: <code>new_name.txt</code>\n\n"
+                f"<i>The renamed file will be sent to you and deleted from GitHub.</i>",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode=ParseMode.HTML
             )
@@ -1017,74 +1014,170 @@ class ArchiveBot:
             )
             return
         
+        # ============================================
+        # RENAME - Download, Rename, Send, Delete
+        # ============================================
         if session and session.get('step') == 'waiting_rename':
             file_id = session.get('rename_file_id')
             file_data = self.github_data.get_file(user_id, file_id)
             
-            if file_data:
-                # Download from GitHub
-                github_path = f"user_files/{user_id}/{file_data['name']}"
+            if not file_data:
+                update.message.reply_text("❌ File not found")
+                self.clear_session(user_id)
+                return
+            
+            new_name = text
+            old_name = file_data['name']
+            
+            # Show progress
+            msg = update.message.reply_text(
+                f"✏️ <b>Renaming file...</b>\n\n"
+                f"📄 {old_name} → {new_name}\n"
+                f"{ProgressBar.circular(0)}",
+                parse_mode=ParseMode.HTML
+            )
+            
+            try:
+                # Step 1: Download from GitHub
+                github_path = f"user_files/{user_id}/{old_name}"
                 github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
                 response = requests.get(github_url)
                 
-                if response.status_code == 200:
-                    content = response.content
-                    encoded = base64.b64encode(content).decode('utf-8')
+                if response.status_code != 200:
+                    msg.edit_text("❌ Could not download file from GitHub")
+                    self.clear_session(user_id)
+                    return
+                
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Downloading...\n"
+                    f"{ProgressBar.circular(30)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                content = response.content
+                
+                # Step 2: Upload with new name to GitHub (temporary)
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Uploading renamed file...\n"
+                    f"{ProgressBar.circular(60)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                encoded = base64.b64encode(content).decode('utf-8')
+                new_path = f"user_files/{user_id}/{new_name}"
+                new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
+                headers = {
+                    "Authorization": f"token {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github.v3+json"
+                }
+                
+                # Check if new name already exists
+                sha = None
+                try:
+                    check_response = requests.get(new_url, headers=headers)
+                    if check_response.status_code == 200:
+                        sha = check_response.json().get('sha')
+                except:
+                    pass
+                
+                data = {
+                    "message": f"Rename {old_name} to {new_name} by user {user_id}",
+                    "content": encoded,
+                    "branch": GITHUB_BRANCH
+                }
+                if sha:
+                    data["sha"] = sha
+                
+                upload_response = requests.put(new_url, headers=headers, json=data)
+                
+                if upload_response.status_code not in [200, 201]:
+                    msg.edit_text(f"❌ Upload failed: {upload_response.text}")
+                    self.clear_session(user_id)
+                    return
+                
+                # Step 3: Delete old file from GitHub
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Deleting old file...\n"
+                    f"{ProgressBar.circular(80)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                self.github_data.delete_file_from_github(user_id, old_name)
+                
+                # Step 4: Update database
+                self.github_data.delete_user_file(user_id, file_id)
+                self.github_data.add_file(
+                    secrets.token_hex(16),
+                    user_id,
+                    new_name,
+                    file_data['size'],
+                    file_data['file_id'],
+                    new_url
+                )
+                
+                # Step 5: Download renamed file and send to user
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Sending renamed file...\n"
+                    f"{ProgressBar.circular(90)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                # Download the renamed file
+                download_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{new_path}"
+                download_response = requests.get(download_url)
+                
+                if download_response.status_code == 200:
+                    temp_path = os.path.join(TEMP_DIR, f"{user_id}_{new_name}")
+                    with open(temp_path, 'wb') as f:
+                        f.write(download_response.content)
                     
-                    # Upload with new name
-                    new_path = f"user_files/{user_id}/{text}"
-                    new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
-                    headers = {
-                        "Authorization": f"token {GITHUB_TOKEN}",
-                        "Accept": "application/vnd.github.v3+json"
-                    }
-                    
-                    sha = None
-                    try:
-                        check_response = requests.get(new_url, headers=headers)
-                        if check_response.status_code == 200:
-                            sha = check_response.json().get('sha')
-                    except:
-                        pass
-                    
-                    data = {
-                        "message": f"Rename {file_data['name']} to {text} by user {user_id}",
-                        "content": encoded,
-                        "branch": GITHUB_BRANCH
-                    }
-                    if sha:
-                        data["sha"] = sha
-                    
-                    upload_response = requests.put(new_url, headers=headers, json=data)
-                    
-                    if upload_response.status_code in [200, 201]:
-                        # Delete old file
-                        self.github_data.delete_file_from_github(user_id, file_data['name'])
-                        # Update database
-                        self.github_data.delete_user_file(user_id, file_id)
-                        self.github_data.add_file(
-                            secrets.token_hex(16),
-                            user_id,
-                            text,
-                            file_data['size'],
-                            file_data['file_id'],
-                            new_url
-                        )
-                        
-                        update.message.reply_text(
-                            f"✅ File renamed to: <b>{text}</b>",
-                            reply_markup=InlineKeyboardMarkup([
-                                [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
-                                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-                            ]),
+                    # Send the file to user
+                    with open(temp_path, 'rb') as doc:
+                        context.bot.send_document(
+                            chat_id=update.message.chat_id,
+                            document=doc,
+                            filename=new_name,
+                            caption=f"✅ <b>File renamed successfully!</b>\n\n📄 {old_name} → {new_name}",
                             parse_mode=ParseMode.HTML
                         )
-                    else:
-                        update.message.reply_text(f"❌ Rename failed")
+                    
+                    # Cleanup temp file
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    # Step 6: Delete from GitHub after sending
+                    msg.edit_text(
+                        f"✏️ <b>Renaming file...</b>\n\n"
+                        f"📄 Deleting from GitHub...\n"
+                        f"{ProgressBar.circular(95)}",
+                        parse_mode=ParseMode.HTML
+                    )
+                    
+                    self.github_data.delete_file_from_github(user_id, new_name)
+                    
+                    # Update database (remove the renamed file since it's been sent and deleted)
+                    files = self.github_data.get_user_files(user_id)
+                    for f in files:
+                        if f.get('name') == new_name:
+                            self.github_data.delete_user_file(user_id, f['id'])
+                            break
+                    
+                    msg.edit_text(
+                        f"✅ <b>File renamed and sent!</b>\n\n"
+                        f"📄 {old_name} → {new_name}\n"
+                        f"🗑️ Deleted from GitHub after sending\n\n"
+                        f"{ProgressBar.circular(100)}",
+                        parse_mode=ParseMode.HTML
+                    )
                 else:
-                    update.message.reply_text("❌ Could not download file from GitHub")
-            else:
-                update.message.reply_text("❌ File not found")
+                    msg.edit_text("❌ Could not download renamed file")
+                
+            except Exception as e:
+                msg.edit_text(f"❌ Error during rename: {str(e)}")
             
             self.clear_session(user_id)
             return
@@ -1262,7 +1355,6 @@ class ArchiveBot:
         for file_data in files:
             self.extract_and_send(update, context, user_id, file_data)
         
-        # After all files are processed
         query.edit_message_text("✅ All files extracted and sent!")
 
     # ============================================
@@ -1362,7 +1454,6 @@ class ArchiveBot:
     def compress_all_files(self, update, context, user_id):
         query = update.callback_query
         
-        # Show compression options
         kb = [
             [InlineKeyboardButton("📦 ZIP", callback_data="compress_all_zip")],
             [InlineKeyboardButton("📦 7Z", callback_data="compress_all_7z")],
