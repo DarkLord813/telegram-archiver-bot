@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - COMPLETE VERSION
+# TELEGRAM ARCHIVE BOT - NO API ID/HASH REQUIRED
+# Uses direct CDN streaming for large files (2GB)
 # All data stored in GitHub - Auto-delete after send
 # ============================================
 
@@ -82,8 +83,7 @@ class GitHubDataManager:
                     decoded = base64.b64decode(content['content']).decode('utf-8')
                     return json.loads(decoded)
             return None
-        except Exception as e:
-            logger.error(f"Error getting file content: {e}")
+        except:
             return None
 
     def _update_file(self, path: str, data: dict, message: str) -> bool:
@@ -132,6 +132,87 @@ class GitHubDataManager:
         except:
             return False
 
+    # ============================================
+    # USER DATA
+    # ============================================
+    def get_user(self, user_id: int) -> Optional[Dict]:
+        data = self._get_file_content(f"data/users/{user_id}.json")
+        return data
+
+    def create_user(self, user_id: int, username: str, first_name: str):
+        user_data = {
+            "user_id": user_id,
+            "username": username or '',
+            "first_name": first_name,
+            "file_prefix": "",
+            "archive_password": "",
+            "thumbnail_path": "",
+            "created_at": datetime.now().isoformat()
+        }
+        self._update_file(
+            f"data/users/{user_id}.json",
+            user_data,
+            f"Create user {user_id}"
+        )
+
+    def update_user(self, user_id: int, field: str, value: str):
+        user_data = self.get_user(user_id)
+        if user_data:
+            user_data[field] = value
+            self._update_file(
+                f"data/users/{user_id}.json",
+                user_data,
+                f"Update user {user_id} - {field}"
+            )
+
+    def get_user_field(self, user_id: int, field: str) -> str:
+        user_data = self.get_user(user_id)
+        if user_data:
+            return user_data.get(field, '')
+        return ''
+
+    # ============================================
+    # SESSION DATA
+    # ============================================
+    def get_session(self, user_id: int) -> dict:
+        data = self._get_file_content(f"data/sessions/{user_id}.json")
+        return data if data else {}
+
+    def save_session(self, user_id: int, session_data: dict):
+        self._update_file(
+            f"data/sessions/{user_id}.json",
+            session_data,
+            f"Save session for user {user_id}"
+        )
+
+    def delete_session(self, user_id: int):
+        self._delete_file(
+            f"data/sessions/{user_id}.json",
+            f"Delete session for user {user_id}"
+        )
+
+    # ============================================
+    # FILE DATA
+    # ============================================
+    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
+        user_files = self.get_user_files(user_id)
+        file_data = {
+            "id": file_id,
+            "user_id": user_id,
+            "name": name,
+            "size": size,
+            "file_id": telegram_file_id,
+            "github_path": github_path,
+            "created_at": datetime.now().isoformat(),
+            "is_active": 1
+        }
+        user_files.append(file_data)
+        self._update_file(
+            f"data/files/{user_id}.json",
+            {"files": user_files},
+            f"Add file {name} for user {user_id}"
+        )
+
     def get_user_files(self, user_id: int) -> List[Dict]:
         data = self._get_file_content(f"data/files/{user_id}.json")
         if data and data.get('files'):
@@ -145,57 +226,101 @@ class GitHubDataManager:
                 return f
         return None
 
-    def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
-        path = f"user_files/{user_id}/{file_name}"
-        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
-
     def delete_user_file(self, user_id: int, file_id: str):
-        files = self.get_user_files(user_id)
-        for f in files:
+        user_files = self.get_user_files(user_id)
+        for f in user_files:
             if f.get('id') == file_id:
                 f['is_active'] = 0
                 self._update_file(
                     f"data/files/{user_id}.json",
-                    {"files": files},
+                    {"files": user_files},
                     f"Delete file {file_id} for user {user_id}"
                 )
                 return True
         return False
 
-    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
-        files = self.get_user_files(user_id)
-        file_data = {
-            "id": file_id,
-            "user_id": user_id,
-            "name": name,
-            "size": size,
-            "file_id": telegram_file_id,
-            "github_path": github_path,
-            "created_at": datetime.now().isoformat(),
-            "is_active": 1
-        }
-        files.append(file_data)
-        self._update_file(
-            f"data/files/{user_id}.json",
-            {"files": files},
-            f"Add file {name} for user {user_id}"
-        )
+    def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
+        path = f"user_files/{user_id}/{file_name}"
+        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
 
-    def get_user_field(self, user_id: int, field: str) -> str:
-        data = self._get_file_content(f"data/users/{user_id}.json")
-        if data:
-            return data.get(field, '')
-        return ''
 
-    def update_user(self, user_id: int, field: str, value: str):
-        data = self._get_file_content(f"data/users/{user_id}.json")
-        if data:
-            data[field] = value
-            self._update_file(
-                f"data/users/{user_id}.json",
-                data,
-                f"Update user {user_id} - {field}"
-            )
+# ============================================
+# DIRECT FILE DOWNLOADER - NO API ID/HASH
+# ============================================
+class DirectFileDownloader:
+    """
+    Downloads files directly from Telegram CDN using the file path URL.
+    This bypasses the 20MB limit of the bot's download() method.
+    """
+    
+    @staticmethod
+    def get_download_url(bot_token: str, file_id: str) -> Optional[str]:
+        """
+        Get the direct download URL for a file using the Telegram Bot API.
+        Returns the URL that can be used with requests.get() for streaming.
+        """
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get('ok') and data.get('result'):
+                file_path = data['result']['file_path']
+                # Construct the full download URL
+                download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+                return download_url
+            else:
+                logger.error(f"Failed to get file info: {data}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting download URL: {e}")
+            return None
+
+    @staticmethod
+    def download_file(bot_token: str, file_id: str, save_path: str, progress_callback=None) -> bool:
+        """
+        Download a file using streaming from the direct CDN URL.
+        Supports files up to 2GB.
+        """
+        try:
+            # Get the download URL
+            download_url = DirectFileDownloader.get_download_url(bot_token, file_id)
+            if not download_url:
+                return False
+            
+            if progress_callback:
+                progress_callback(10, "Starting download...")
+            
+            # Stream download with chunking
+            response = requests.get(download_url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            last_progress = 0
+            
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback and total_size > 0:
+                            progress = 10 + (downloaded / total_size) * 80
+                            if int(progress) > last_progress + 2:
+                                last_progress = int(progress)
+                                progress_callback(progress, f"Downloading... {int(progress)}%")
+            
+            if progress_callback:
+                progress_callback(90, "Download complete!")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return False
 
 
 # ============================================
@@ -203,50 +328,24 @@ class GitHubDataManager:
 # ============================================
 class FastGitHubUploader:
     @staticmethod
-    def upload_file_directly(bot_token: str, file_id: str, github_token: str, github_owner: str,
-                           github_repo: str, github_branch: str, file_name: str, user_id: int,
-                           progress_callback=None) -> tuple:
+    def upload_file(file_path: str, file_name: str, user_id: int, progress_callback=None) -> tuple:
         try:
-            telegram_url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
-            response = requests.get(telegram_url)
-            response.raise_for_status()
-            file_info = response.json()
-            
-            if not file_info.get('ok'):
-                return False, f"Failed to get file info: {file_info}"
-            
-            file_path = file_info['result']['file_path']
-            download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-            
             if progress_callback:
-                progress_callback(10, "Starting upload...")
+                progress_callback(10, "Reading file...")
             
-            response = requests.get(download_url, stream=True)
-            response.raise_for_status()
+            with open(file_path, 'rb') as f:
+                content = f.read()
             
-            content_parts = []
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            for chunk in response.iter_content(chunk_size=131072):
-                if chunk:
-                    content_parts.append(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and total_size > 0:
-                        progress = 10 + (downloaded / total_size) * 60
-                        progress_callback(progress, f"Downloading... {int(progress)}%")
-            
-            content = b''.join(content_parts)
             encoded = base64.b64encode(content).decode('utf-8')
             
             if progress_callback:
-                progress_callback(70, "Uploading to GitHub...")
+                progress_callback(50, "Uploading to GitHub...")
             
             github_path = f"user_files/{user_id}/{file_name}"
-            github_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/contents/{github_path}"
+            github_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{github_path}"
             
             headers = {
-                "Authorization": f"token {github_token}",
+                "Authorization": f"token {GITHUB_TOKEN}",
                 "Accept": "application/vnd.github.v3+json"
             }
             
@@ -261,7 +360,7 @@ class FastGitHubUploader:
             data = {
                 "message": f"Upload {file_name} by user {user_id}",
                 "content": encoded,
-                "branch": github_branch
+                "branch": GITHUB_BRANCH
             }
             if sha:
                 data["sha"] = sha
@@ -271,7 +370,7 @@ class FastGitHubUploader:
             if upload_response.status_code in [200, 201]:
                 if progress_callback:
                     progress_callback(100, "Upload complete!")
-                return True, f"https://raw.githubusercontent.com/{github_owner}/{github_repo}/{github_branch}/{github_path}"
+                return True, f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
             else:
                 return False, f"GitHub upload failed: {upload_response.text}"
                 
@@ -304,13 +403,14 @@ class ProgressBar:
 
 
 # ============================================
-# MAIN BOT CLASS
+# BOT HANDLERS
 # ============================================
 class ArchiveBot:
     def __init__(self):
         self.github_data = GitHubDataManager(GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
         self.bot_username = ''
         self.bot_id = 0
+        self.session_cache = {}
         self.user_sessions = {}
 
     def format_size(self, bytes: int) -> str:
@@ -344,6 +444,30 @@ class ArchiveBot:
             return update.message.from_user.id
         return None
 
+    # ============================================
+    # SESSION MANAGEMENT
+    # ============================================
+    def get_session(self, user_id: int) -> dict:
+        if user_id in self.session_cache:
+            return self.session_cache[user_id]
+        session = self.github_data.get_session(user_id)
+        if session:
+            self.session_cache[user_id] = session
+            return session
+        return {}
+
+    def save_session(self, user_id: int, session_data: dict):
+        self.session_cache[user_id] = session_data
+        self.github_data.save_session(user_id, session_data)
+
+    def clear_session(self, user_id: int):
+        if user_id in self.session_cache:
+            del self.session_cache[user_id]
+        self.github_data.delete_session(user_id)
+
+    # ============================================
+    # START COMMAND
+    # ============================================
     def start_command(self, update: Update, context: CallbackContext):
         user_id = self.get_user_id(update)
         if not user_id:
@@ -365,6 +489,8 @@ class ArchiveBot:
         if not existing_user:
             self.github_data.create_user(user_id, user.username or '', user.first_name or 'User')
         
+        self.clear_session(user_id)
+        
         kb = [
             [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
             [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
@@ -375,13 +501,128 @@ class ArchiveBot:
         update.message.reply_text(
             f"🌟 <b>Welcome {user.first_name}!</b>\n\n"
             f"📤 Upload files directly to GitHub\n"
-            f"📁 Files are stored securely\n"
+            f"📁 Files are stored securely (up to 2GB)\n"
             f"⚙️ Customize settings from the menu\n\n"
             f"Choose an option:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
 
+    # ============================================
+    # SETTINGS
+    # ============================================
+    def settings_menu(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        prefix = self.github_data.get_user_field(user_id, 'file_prefix')
+        password = self.github_data.get_user_field(user_id, 'archive_password')
+        thumb = self.github_data.get_user_field(user_id, 'thumbnail_path')
+        
+        kb = [
+            [InlineKeyboardButton("📝 Set File Prefix", callback_data="set_prefix")],
+            [InlineKeyboardButton("🔑 Set Archive Password", callback_data="set_password")],
+            [InlineKeyboardButton("🖼️ Set Thumbnail", callback_data="set_thumb")],
+            [InlineKeyboardButton("🗑️ Remove Thumbnail", callback_data="remove_thumb")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+        ]
+        
+        settings_text = (
+            f"⚙️ <b>Settings</b>\n\n"
+            f"📝 <b>File Prefix:</b> {prefix if prefix else 'None'}\n"
+            f"🔑 <b>Archive Password:</b> {'✅ Set' if password else '❌ Not set'}\n"
+            f"🖼️ <b>Thumbnail:</b> {'✅ Set' if thumb else '❌ Not set'}\n\n"
+            f"<i>Configure your file settings below:</i>"
+        )
+        
+        query.edit_message_text(
+            settings_text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_set_prefix(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        session = self.get_session(user_id)
+        session['step'] = 'waiting_prefix'
+        self.save_session(user_id, session)
+        
+        kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
+        
+        query.edit_message_text(
+            "📝 <b>Set File Prefix</b>\n\n"
+            "Send your desired prefix in the chat.\n"
+            "Example: <code>MY_FILE_</code>",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_set_password(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        session = self.get_session(user_id)
+        session['step'] = 'waiting_password'
+        self.save_session(user_id, session)
+        
+        kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
+        
+        query.edit_message_text(
+            "🔑 <b>Set Archive Password</b>\n\n"
+            "Send your desired password in the chat.\n"
+            "Example: <code>mysecret123</code>\n\n"
+            "This password will be used for all archives you create.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_set_thumb(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        session = self.get_session(user_id)
+        session['step'] = 'waiting_thumb'
+        self.save_session(user_id, session)
+        
+        kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
+        
+        query.edit_message_text(
+            "🖼️ <b>Set Thumbnail</b>\n\n"
+            "Send a photo to use as thumbnail.\n\n"
+            "📸 <b>Supported:</b> JPG, PNG, WEBP\n"
+            "📏 <b>Recommended:</b> 320x320 pixels",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    def handle_remove_thumb(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        self.github_data.update_user(user_id, 'thumbnail_path', '')
+        query.edit_message_text(
+            "🗑️ Thumbnail removed!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+            ])
+        )
+
+    # ============================================
+    # CALLBACK HANDLER
+    # ============================================
     def callback_handler(self, update: Update, context: CallbackContext):
         query = update.callback_query
         query.answer()
@@ -404,6 +645,7 @@ class ArchiveBot:
         
         if data == "check_join":
             if self.check_force_join(context, user_id):
+                user = query.from_user
                 kb = [
                     [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
                     [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
@@ -412,7 +654,7 @@ class ArchiveBot:
                 ]
                 query.edit_message_text(
                     f"✅ <b>Success!</b> You've joined the channel!\n\n"
-                    f"🌟 Welcome!",
+                    f"🌟 Welcome {user.first_name}!",
                     reply_markup=InlineKeyboardMarkup(kb),
                     parse_mode=ParseMode.HTML
                 )
@@ -427,15 +669,19 @@ class ArchiveBot:
         if data == "help":
             query.edit_message_text(
                 "❓ <b>Help</b>\n\n"
-                "📤 <b>Upload Files</b>: Send files to GitHub\n"
-                "📋 <b>My Files</b>: View your files\n"
-                "⚙️ <b>Settings</b>: Set prefix & password\n\n"
+                "📤 <b>Upload Files</b>: Send files directly to GitHub\n"
+                "📋 <b>My Files</b>: View and manage your files\n"
+                "⚙️ <b>Settings</b>: Customize your preferences\n\n"
+                "<b>Settings:</b>\n"
+                "📝 File Prefix: Add prefix to filenames\n"
+                "🔑 Archive Password: Protect archives\n"
+                "🖼️ Thumbnail: Set custom thumbnail\n\n"
                 "<b>File Actions:</b>\n"
-                "📦 Extract: Unpack ZIP/RAR/7z\n"
-                "🗜️ Compress: Create ZIP/7z\n"
-                "✏️ Rename: Rename files\n"
+                "📦 Extract: Unpack ZIP/RAR/7z (single or all)\n"
+                "🗜️ Compress: Create ZIP/7z (single or all)\n"
+                "✏️ Rename: Rename & send files\n"
                 "🗑️ Delete: Remove from storage\n\n"
-                f"📢 Required: {FORCE_CHANNEL}",
+                f"📢 Required Channel: {FORCE_CHANNEL}",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                 ]),
@@ -444,115 +690,134 @@ class ArchiveBot:
             return
         
         if data == "back_to_menu":
-            kb = [
-                [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
-                [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
-                [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                [InlineKeyboardButton("❓ Help", callback_data="help")]
-            ]
-            query.edit_message_text(
-                "🏠 <b>Main Menu</b>\n\nChoose an option:",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
+            self.show_main_menu(update, context, user_id)
             return
         
         if data == "settings":
-            prefix = self.github_data.get_user_field(user_id, 'file_prefix')
-            password = self.github_data.get_user_field(user_id, 'archive_password')
-            
-            kb = [
-                [InlineKeyboardButton("📝 Set Prefix", callback_data="set_prefix")],
-                [InlineKeyboardButton("🔑 Set Password", callback_data="set_password")],
-                [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-            ]
-            
-            query.edit_message_text(
-                f"⚙️ <b>Settings</b>\n\n"
-                f"📝 Prefix: {prefix if prefix else 'None'}\n"
-                f"🔑 Password: {'✅' if password else '❌'}\n",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
+            self.settings_menu(update, context)
             return
         
         if data == "set_prefix":
-            kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
-            query.edit_message_text(
-                "📝 <b>Send your prefix</b>\n\nExample: <code>MY_FILE_</code>",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
-            self.user_sessions[user_id] = {'step': 'waiting_prefix'}
+            self.handle_set_prefix(update, context)
             return
         
         if data == "set_password":
-            kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
-            query.edit_message_text(
-                "🔑 <b>Send your password</b>\n\nExample: <code>mysecret123</code>",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
-            self.user_sessions[user_id] = {'step': 'waiting_password'}
+            self.handle_set_password(update, context)
+            return
+        
+        if data == "set_thumb":
+            self.handle_set_thumb(update, context)
+            return
+        
+        if data == "remove_thumb":
+            self.handle_remove_thumb(update, context)
             return
         
         if data == "upload":
+            session = self.get_session(user_id)
+            session['step'] = 'waiting_file'
+            if 'files' not in session:
+                session['files'] = []
+            self.save_session(user_id, session)
+            
             kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
+            
             query.edit_message_text(
-                "📤 <b>Send your file(s)</b>\n\nAfter uploading all, click <b>✅ Done</b>.",
+                "📤 <b>Upload Files</b>\n\n"
+                "Send any file(s) you want to store on GitHub.\n"
+                "You can send multiple files.\n\n"
+                "After uploading all files, click <b>✅ Done</b>.\n"
+                "📦 <b>Max file size:</b> 2GB",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode=ParseMode.HTML
             )
-            self.user_sessions[user_id] = {'step': 'waiting_file', 'files': []}
             return
         
         if data == "done_upload":
-            session = self.user_sessions.get(user_id, {})
+            session = self.get_session(user_id)
             files = session.get('files', [])
             
             if not files:
                 query.edit_message_text(
-                    "❌ No files uploaded!",
+                    "❌ No files uploaded yet!",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📤 Upload", callback_data="upload")],
+                        [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
                         [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                     ])
                 )
                 return
             
             query.edit_message_text(
-                f"📤 Uploading {len(files)} files...\n\n{ProgressBar.circular(0)}",
+                f"📤 <b>Uploading {len(files)} files to GitHub...</b>\n\n"
+                f"{ProgressBar.circular(0)}\n\n"
+                f"<i>Please wait...</i>",
                 parse_mode=ParseMode.HTML
             )
             
-            uploaded = 0
-            total = len(files)
+            uploaded_count = 0
+            total_files = len(files)
             
-            for i, (fid, fname, fsize) in enumerate(files):
-                def progress_cb(p, msg):
-                    overall = ((i + (p / 100)) / total) * 100
+            for i, (file_id, file_name, file_size) in enumerate(files):
+                temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
+                
+                def download_progress(progress, message):
+                    overall = ((i + (progress / 100)) / total_files) * 100
                     try:
                         query.edit_message_text(
-                            f"📤 Uploading...\n📄 {fname}\n\n{ProgressBar.circular(overall)}",
+                            f"📥 <b>Downloading...</b>\n\n"
+                            f"📄 {file_name}\n"
+                            f"{ProgressBar.circular(overall)}\n\n"
+                            f"<i>{message}</i>",
                             parse_mode=ParseMode.HTML
                         )
                     except:
                         pass
                 
-                success, result = FastGitHubUploader.upload_file_directly(
-                    BOT_TOKEN, fid, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
-                    GITHUB_BRANCH, fname, user_id, progress_cb
+                # Use direct download (no API ID/Hash required)
+                logger.info(f"Downloading file {file_name} (ID: {file_id}) using direct CDN streaming")
+                
+                download_success = DirectFileDownloader.download_file(
+                    BOT_TOKEN, 
+                    file_id, 
+                    temp_path,
+                    download_progress
+                )
+                
+                if not download_success:
+                    query.edit_message_text(f"❌ Failed to download {file_name}")
+                    continue
+                
+                # Upload to GitHub
+                def upload_progress(progress, message):
+                    overall = ((i + 0.6 + (progress / 100 * 0.4)) / total_files) * 100
+                    try:
+                        query.edit_message_text(
+                            f"📤 <b>Uploading to GitHub...</b>\n\n"
+                            f"📄 {file_name}\n"
+                            f"{ProgressBar.circular(overall)}\n\n"
+                            f"<i>{message}</i>",
+                            parse_mode=ParseMode.HTML
+                        )
+                    except:
+                        pass
+                
+                success, result = FastGitHubUploader.upload_file(
+                    temp_path, file_name, user_id, upload_progress
                 )
                 
                 if success:
                     unique_id = secrets.token_hex(16)
-                    self.github_data.add_file(unique_id, user_id, fname, fsize, fid, result)
-                    uploaded += 1
+                    self.github_data.add_file(unique_id, user_id, file_name, file_size, file_id, result)
+                    uploaded_count += 1
                 else:
-                    query.edit_message_text(f"❌ Failed: {fname}")
-                    time.sleep(1)
+                    query.edit_message_text(f"❌ Failed to upload {file_name}: {result}")
+                
+                # Cleanup temp file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
             
-            self.user_sessions[user_id] = {}
+            session['files'] = []
+            self.save_session(user_id, session)
             
             kb = [
                 [InlineKeyboardButton("📦 Extract All", callback_data="extract_all")],
@@ -562,7 +827,9 @@ class ArchiveBot:
             ]
             
             query.edit_message_text(
-                f"✅ {uploaded}/{total} uploaded!\n\nWhat now?",
+                f"✅ <b>Upload Complete!</b>\n\n"
+                f"📄 {uploaded_count}/{total_files} files uploaded to GitHub\n\n"
+                f"<b>What would you like to do with your files?</b>",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode=ParseMode.HTML
             )
@@ -573,11 +840,14 @@ class ArchiveBot:
             
             if not files:
                 query.edit_message_text(
-                    "📂 No files found.",
+                    "📂 <b>My Files</b>\n\n"
+                    "No files uploaded yet.\n\n"
+                    "Upload a file to get started!",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("📤 Upload", callback_data="upload")],
                         [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-                    ])
+                    ]),
+                    parse_mode=ParseMode.HTML
                 )
                 return
             
@@ -606,7 +876,7 @@ class ArchiveBot:
             )
             return
         
-        # --- DELETE ---
+        # ---- DELETE FILE ----
         if data.startswith("delete_"):
             file_id = data.replace("delete_", "")
             file_data = self.github_data.get_file(user_id, file_id)
@@ -624,94 +894,66 @@ class ArchiveBot:
             )
             return
         
-        # --- EXTRACT ---
+        # ---- EXTRACT SINGLE FILE ----
+        if data.startswith("extract_") and data != "extract_all":
+            file_id = data.replace("extract_", "")
+            self.extract_file(update, context, user_id, file_id)
+            return
+        
+        # ---- EXTRACT ALL FILES ----
         if data == "extract_all":
             self.extract_all_files(update, context, user_id)
             return
         
-        if data.startswith("extract_"):
-            file_id = data.replace("extract_", "")
-            self.extract_single_file(update, context, user_id, file_id)
-            return
-        
-        # --- COMPRESS ---
-        if data == "compress_all":
-            kb = [
-                [InlineKeyboardButton("📦 ZIP", callback_data="compress_all_zip")],
-                [InlineKeyboardButton("📦 7Z", callback_data="compress_all_7z")],
-                [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
-            ]
-            query.edit_message_text(
-                "🗜️ <b>Compress All</b>\n\nChoose format:",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
-            return
-        
-        if data == "compress_all_zip":
-            self.compress_all_files(update, context, user_id, "zip")
-            return
-        
-        if data == "compress_all_7z":
-            self.compress_all_files(update, context, user_id, "7z")
-            return
-        
-        if data.startswith("compress_"):
-            # Single file compression - show format options
+        # ---- COMPRESS SINGLE FILE ----
+        if data.startswith("compress_") and data != "compress_all":
             file_id = data.replace("compress_", "")
-            file_data = self.github_data.get_file(user_id, file_id)
-            
-            if not file_data:
-                query.edit_message_text("❌ File not found")
-                return
-            
-            kb = [
-                [InlineKeyboardButton("📦 ZIP", callback_data=f"compress_single_zip_{file_id}")],
-                [InlineKeyboardButton("📦 7Z", callback_data=f"compress_single_7z_{file_id}")],
-                [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
-            ]
-            
-            query.edit_message_text(
-                f"🗜️ <b>Compress: {file_data['name']}</b>\n\nChoose format:",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode=ParseMode.HTML
-            )
+            self.compress_file(update, context, user_id, file_id)
             return
         
-        # Single file compression with format
+        # ---- COMPRESS ALL FILES ----
+        if data == "compress_all":
+            self.compress_all_files(update, context, user_id)
+            return
+        
+        # ---- COMPRESS WITH FORMAT ----
         if data.startswith("compress_single_zip_"):
             file_id = data.replace("compress_single_zip_", "")
-            self.compress_single_file(update, context, user_id, file_id, "zip")
+            self.compress_single_with_format(update, context, user_id, file_id, "zip")
             return
         
         if data.startswith("compress_single_7z_"):
             file_id = data.replace("compress_single_7z_", "")
-            self.compress_single_file(update, context, user_id, file_id, "7z")
+            self.compress_single_with_format(update, context, user_id, file_id, "7z")
             return
         
-        # --- RENAME ---
+        if data.startswith("compress_all_"):
+            format_type = data.replace("compress_all_", "")
+            self.compress_all_with_format(update, context, user_id, format_type)
+            return
+        
+        # ---- RENAME FILE ----
         if data.startswith("rename_"):
             file_id = data.replace("rename_", "")
-            file_data = self.github_data.get_file(user_id, file_id)
-            
-            if not file_data:
-                query.edit_message_text("❌ File not found")
-                return
+            session = self.get_session(user_id)
+            session['step'] = 'waiting_rename'
+            session['rename_file_id'] = file_id
+            self.save_session(user_id, session)
             
             kb = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
             
             query.edit_message_text(
-                f"✏️ <b>Rename: {file_data['name']}</b>\n\n"
-                f"Send new name.\nExample: <code>new_name.txt</code>",
+                f"✏️ <b>Rename File</b>\n\n"
+                f"Send the new name for this file.\n"
+                f"Example: <code>new_name.txt</code>\n\n"
+                f"<i>The renamed file will be sent to you and deleted from GitHub.</i>",
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode=ParseMode.HTML
             )
-            
-            self.user_sessions[user_id] = {'step': 'waiting_rename', 'file_id': file_id}
             return
         
         if data == "cancel":
-            self.user_sessions.pop(user_id, None)
+            self.clear_session(user_id)
             query.edit_message_text(
                 "❌ Cancelled",
                 reply_markup=InlineKeyboardMarkup([
@@ -721,385 +963,33 @@ class ArchiveBot:
             return
 
     # ============================================
-    # EXTRACT FUNCTIONS
+    # SHOW MAIN MENU
     # ============================================
-    def extract_single_file(self, update, context, user_id, file_id):
+    def show_main_menu(self, update, context, user_id):
         query = update.callback_query
-        file_data = self.github_data.get_file(user_id, file_id)
+        user = self.github_data.get_user(user_id)
+        name = user['first_name'] if user else 'User'
         
-        if not file_data:
-            query.edit_message_text("❌ File not found")
-            return
+        kb = [
+            [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
+            [InlineKeyboardButton("📋 My Files", callback_data="my_files")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")]
+        ]
         
-        self.extract_and_send(update, context, user_id, file_data)
-
-    def extract_all_files(self, update, context, user_id):
-        query = update.callback_query
-        files = self.github_data.get_user_files(user_id)
-        
-        if not files:
-            query.edit_message_text("❌ No files to extract.")
-            return
-        
-        for file_data in files:
-            self.extract_and_send(update, context, user_id, file_data)
-        
-        query.edit_message_text("✅ All files extracted and sent!")
-
-    def extract_and_send(self, update, context, user_id, file_data):
-        query = update.callback_query
-        file_name = file_data['name']
-        
-        query.edit_message_text(f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(0)}")
-        
-        # Download from GitHub
-        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/user_files/{user_id}/{file_name}"
-        response = requests.get(github_url)
-        
-        if response.status_code != 200:
-            query.edit_message_text("❌ Could not download file")
-            return
-        
-        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-        with open(temp_path, 'wb') as f:
-            f.write(response.content)
-        
-        ext = os.path.splitext(file_name)[1].lower()
-        if ext not in ['.zip', '.rar', '.7z']:
-            query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
-            os.remove(temp_path)
-            return
-        
-        try:
-            extract_dir = os.path.join(TEMP_DIR, f"{user_id}_extracted")
-            os.makedirs(extract_dir, exist_ok=True)
-            
-            password = self.github_data.get_user_field(user_id, 'archive_password') or None
-            
-            if ext == '.zip':
-                with zipfile.ZipFile(temp_path, 'r') as zip_ref:
-                    if password:
-                        zip_ref.setpassword(password.encode())
-                    total = len(zip_ref.namelist())
-                    for i, name in enumerate(zip_ref.namelist()):
-                        zip_ref.extract(name, extract_dir)
-                        if i % 5 == 0:
-                            progress = (i / total) * 100
-                            query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
-                            )
-                            
-            elif ext == '.rar':
-                with rarfile.RarFile(temp_path) as rar_ref:
-                    if password:
-                        rar_ref.setpassword(password)
-                    total = len(rar_ref.namelist())
-                    for i, name in enumerate(rar_ref.namelist()):
-                        rar_ref.extract(name, extract_dir)
-                        if i % 5 == 0:
-                            progress = (i / total) * 100
-                            query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
-                            )
-                            
-            elif ext == '.7z':
-                with py7zr.SevenZipFile(temp_path, mode='r', password=password) as sz_ref:
-                    files = sz_ref.getnames()
-                    total = len(files)
-                    for i, name in enumerate(files):
-                        sz_ref.extract(targets=[name], path=extract_dir)
-                        if i % 2 == 0:
-                            progress = (i / total) * 100
-                            query.edit_message_text(
-                                f"📦 Extracting... {i+1}/{total}\n\n{ProgressBar.circular(progress)}"
-                            )
-            
-            query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
-            
-            # Send extracted files
-            extracted = []
-            for root, dirs, files in os.walk(extract_dir):
-                for f in files:
-                    extracted.append(os.path.join(root, f))
-            
-            if extracted:
-                context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=f"📤 Sending {len(extracted)} files..."
-                )
-                
-                for f_path in extracted:
-                    with open(f_path, 'rb') as doc:
-                        context.bot.send_document(
-                            chat_id=query.message.chat_id,
-                            document=doc,
-                            filename=os.path.basename(f_path)
-                        )
-            
-            shutil.rmtree(extract_dir, ignore_errors=True)
-            
-        except Exception as e:
-            query.edit_message_text(f"❌ Error: {str(e)}")
-        
-        os.remove(temp_path)
-        
-        # Delete from GitHub after sending
-        self.github_data.delete_file_from_github(user_id, file_name)
-        self.github_data.delete_user_file(user_id, file_data['id'])
+        query.edit_message_text(
+            f"🌟 <b>Welcome back {name}!</b>\n\n"
+            f"📤 Upload files directly to GitHub\n"
+            f"📁 Files are stored securely\n"
+            f"⚙️ Customize settings from the menu\n\n"
+            f"Choose an option:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
 
     # ============================================
-    # COMPRESS FUNCTIONS
+    # FILE HANDLER
     # ============================================
-    def compress_single_file(self, update, context, user_id, file_id, format_type):
-        query = update.callback_query
-        file_data = self.github_data.get_file(user_id, file_id)
-        
-        if not file_data:
-            query.edit_message_text("❌ File not found")
-            return
-        
-        self.compress_and_send(update, context, user_id, file_data, format_type)
-
-    def compress_all_files(self, update, context, user_id, format_type):
-        query = update.callback_query
-        files = self.github_data.get_user_files(user_id)
-        
-        if not files:
-            query.edit_message_text("❌ No files to compress.")
-            return
-        
-        for file_data in files:
-            self.compress_and_send(update, context, user_id, file_data, format_type)
-        
-        query.edit_message_text("✅ All files compressed and sent!")
-
-    def compress_and_send(self, update, context, user_id, file_data, format_type):
-        query = update.callback_query
-        file_name = file_data['name']
-        
-        query.edit_message_text(f"🗜️ Compressing {file_name}...\n\n{ProgressBar.circular(0)}")
-        
-        # Download from GitHub
-        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/user_files/{user_id}/{file_name}"
-        response = requests.get(github_url)
-        
-        if response.status_code != 200:
-            query.edit_message_text("❌ Could not download file")
-            return
-        
-        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-        with open(temp_path, 'wb') as f:
-            f.write(response.content)
-        
-        # Create archive
-        base_name = os.path.splitext(file_name)[0]
-        archive_name = f"{base_name}.{format_type}"
-        archive_path = os.path.join(TEMP_DIR, f"{user_id}_{archive_name}")
-        
-        password = self.github_data.get_user_field(user_id, 'archive_password') or None
-        
-        try:
-            if format_type == 'zip':
-                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    if password:
-                        zipf.setpassword(password.encode())
-                    zipf.write(temp_path, os.path.basename(file_name))
-                    
-            elif format_type == '7z':
-                with py7zr.SevenZipFile(archive_path, 'w', password=password) as szf:
-                    szf.write(temp_path, os.path.basename(file_name))
-            
-            with open(archive_path, 'rb') as doc:
-                context.bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=doc,
-                    filename=archive_name
-                )
-            
-            query.edit_message_text(f"✅ Compression complete!\n\n{ProgressBar.circular(100)}")
-            
-        except Exception as e:
-            query.edit_message_text(f"❌ Error: {str(e)}")
-        
-        os.remove(temp_path)
-        if os.path.exists(archive_path):
-            os.remove(archive_path)
-        
-        # Delete from GitHub after sending
-        self.github_data.delete_file_from_github(user_id, file_name)
-        self.github_data.delete_user_file(user_id, file_data['id'])
-
-    # ============================================
-    # TEXT AND FILE HANDLERS
-    # ============================================
-    def text_handler(self, update: Update, context: CallbackContext):
-        user_id = self.get_user_id(update)
-        if not user_id:
-            return
-        
-        text = update.message.text
-        
-        if not self.check_force_join(context, user_id):
-            update.message.reply_text(
-                f"🔒 Please join {FORCE_CHANNEL} first",
-                reply_markup=self.get_force_join_keyboard()
-            )
-            return
-        
-        session = self.user_sessions.get(user_id, {})
-        step = session.get('step')
-        
-        if step == 'waiting_prefix':
-            self.github_data.update_user(user_id, 'file_prefix', text)
-            self.user_sessions.pop(user_id, None)
-            update.message.reply_text(
-                f"✅ Prefix set: <b>{text}</b>",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-                ]),
-                parse_mode=ParseMode.HTML
-            )
-            return
-        
-        if step == 'waiting_password':
-            self.github_data.update_user(user_id, 'archive_password', text)
-            self.user_sessions.pop(user_id, None)
-            update.message.reply_text(
-                "✅ Password set!",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
-                ]),
-                parse_mode=ParseMode.HTML
-            )
-            return
-        
-        if step == 'waiting_rename':
-            file_id = session.get('file_id')
-            file_data = self.github_data.get_file(user_id, file_id)
-            
-            if not file_data:
-                update.message.reply_text("❌ File not found")
-                self.user_sessions.pop(user_id, None)
-                return
-            
-            new_name = text
-            old_name = file_data['name']
-            
-            msg = update.message.reply_text(
-                f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(0)}",
-                parse_mode=ParseMode.HTML
-            )
-            
-            try:
-                github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/user_files/{user_id}/{old_name}"
-                response = requests.get(github_url)
-                
-                if response.status_code != 200:
-                    msg.edit_text("❌ Could not download file")
-                    self.user_sessions.pop(user_id, None)
-                    return
-                
-                msg.edit_text(
-                    f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(30)}",
-                    parse_mode=ParseMode.HTML
-                )
-                
-                content = response.content
-                encoded = base64.b64encode(content).decode('utf-8')
-                new_path = f"user_files/{user_id}/{new_name}"
-                new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
-                headers = {
-                    "Authorization": f"token {GITHUB_TOKEN}",
-                    "Accept": "application/vnd.github.v3+json"
-                }
-                
-                sha = None
-                try:
-                    check_response = requests.get(new_url, headers=headers)
-                    if check_response.status_code == 200:
-                        sha = check_response.json().get('sha')
-                except:
-                    pass
-                
-                data = {
-                    "message": f"Rename {old_name} to {new_name}",
-                    "content": encoded,
-                    "branch": GITHUB_BRANCH
-                }
-                if sha:
-                    data["sha"] = sha
-                
-                upload_response = requests.put(new_url, headers=headers, json=data)
-                
-                if upload_response.status_code not in [200, 201]:
-                    msg.edit_text("❌ Upload failed")
-                    self.user_sessions.pop(user_id, None)
-                    return
-                
-                msg.edit_text(
-                    f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(80)}",
-                    parse_mode=ParseMode.HTML
-                )
-                
-                self.github_data.delete_file_from_github(user_id, old_name)
-                self.github_data.delete_user_file(user_id, file_id)
-                self.github_data.add_file(
-                    secrets.token_hex(16),
-                    user_id,
-                    new_name,
-                    file_data['size'],
-                    file_data['file_id'],
-                    new_url
-                )
-                
-                msg.edit_text(
-                    f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(90)}",
-                    parse_mode=ParseMode.HTML
-                )
-                
-                download_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{new_path}"
-                download_response = requests.get(download_url)
-                
-                if download_response.status_code == 200:
-                    temp_path = os.path.join(TEMP_DIR, f"{user_id}_{new_name}")
-                    with open(temp_path, 'wb') as f:
-                        f.write(download_response.content)
-                    
-                    with open(temp_path, 'rb') as doc:
-                        context.bot.send_document(
-                            chat_id=update.message.chat_id,
-                            document=doc,
-                            filename=new_name,
-                            caption=f"✅ Renamed: {old_name} → {new_name}"
-                        )
-                    
-                    os.remove(temp_path)
-                    
-                    self.github_data.delete_file_from_github(user_id, new_name)
-                    
-                    files = self.github_data.get_user_files(user_id)
-                    for f in files:
-                        if f.get('name') == new_name:
-                            self.github_data.delete_user_file(user_id, f['id'])
-                            break
-                    
-                    msg.edit_text(
-                        f"✅ Done!\n\n{old_name} → {new_name}\n{ProgressBar.circular(100)}",
-                        parse_mode=ParseMode.HTML
-                    )
-                else:
-                    msg.edit_text("❌ Could not download renamed file")
-                
-            except Exception as e:
-                msg.edit_text(f"❌ Error: {str(e)}")
-            
-            self.user_sessions.pop(user_id, None)
-            return
-        
-        self.file_handler(update, context)
-
     def file_handler(self, update: Update, context: CallbackContext):
         user_id = self.get_user_id(update)
         if not user_id:
@@ -1114,10 +1004,10 @@ class ArchiveBot:
             )
             return
         
-        session = self.user_sessions.get(user_id, {})
-        if session.get('step') != 'waiting_file':
+        session = self.get_session(user_id)
+        if not session or session.get('step') != 'waiting_file':
             msg.reply_text(
-                "⚠️ Use 'Upload Files' button first.",
+                "⚠️ Please use the 'Upload Files' button first.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📤 Upload", callback_data="upload")],
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
@@ -1146,18 +1036,20 @@ class ArchiveBot:
             file_size = file.file_size
             file_id = file.file_id
         else:
-            msg.reply_text("❌ Send a document, photo, or video.")
+            msg.reply_text("❌ Please send a document, photo, or video.")
             return
         
         if file_size > MAX_FILE_SIZE:
-            msg.reply_text(f"❌ File too large ({self.format_size(file_size)})")
+            msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
             return
         
+        # Store ONLY serializable data in session
         if 'files' not in session:
             session['files'] = []
         session['files'].append((file_id, file_name, file_size))
-        self.user_sessions[user_id] = session
+        self.save_session(user_id, session)
         
+        # Show file uploaded message with file list
         file_list = ""
         for _, name, size in session['files']:
             file_list += f"• {name} ({self.format_size(size)})\n"
@@ -1169,19 +1061,546 @@ class ArchiveBot:
         ]
         
         msg.reply_text(
-            f"✅ Uploaded!\n\n📄 Files ({len(session['files'])}):\n{file_list}",
+            f"✅ <b>File uploaded!</b>\n\n"
+            f"📄 <b>Uploaded Files ({len(session['files'])}):</b>\n"
+            f"{file_list}\n\n"
+            f"Click <b>✅ Done</b> when finished uploading.",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
 
-    def photo_handler(self, update: Update, context: CallbackContext):
+    # ============================================
+    # TEXT HANDLER
+    # ============================================
+    def text_handler(self, update: Update, context: CallbackContext):
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        text = update.message.text
+        
+        if not self.check_force_join(context, user_id):
+            update.message.reply_text(
+                f"🔒 Please join {FORCE_CHANNEL} first",
+                reply_markup=self.get_force_join_keyboard()
+            )
+            return
+        
+        session = self.get_session(user_id)
+        
+        if session and session.get('step') == 'waiting_prefix':
+            self.github_data.update_user(user_id, 'file_prefix', text)
+            self.clear_session(user_id)
+            update.message.reply_text(
+                f"✅ Prefix set to: <b>{text}</b>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        if session and session.get('step') == 'waiting_password':
+            self.github_data.update_user(user_id, 'archive_password', text)
+            self.clear_session(user_id)
+            update.message.reply_text(
+                f"✅ Archive password set!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # ============================================
+        # RENAME - Download, Rename, Send, Delete
+        # ============================================
+        if session and session.get('step') == 'waiting_rename':
+            file_id = session.get('rename_file_id')
+            file_data = self.github_data.get_file(user_id, file_id)
+            
+            if not file_data:
+                update.message.reply_text("❌ File not found")
+                self.clear_session(user_id)
+                return
+            
+            new_name = text
+            old_name = file_data['name']
+            
+            # Show progress
+            msg = update.message.reply_text(
+                f"✏️ <b>Renaming file...</b>\n\n"
+                f"📄 {old_name} → {new_name}\n"
+                f"{ProgressBar.circular(0)}",
+                parse_mode=ParseMode.HTML
+            )
+            
+            try:
+                # Step 1: Download from GitHub
+                github_path = f"user_files/{user_id}/{old_name}"
+                github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+                response = requests.get(github_url)
+                
+                if response.status_code != 200:
+                    msg.edit_text("❌ Could not download file from GitHub")
+                    self.clear_session(user_id)
+                    return
+                
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Downloading...\n"
+                    f"{ProgressBar.circular(30)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                content = response.content
+                
+                # Step 2: Upload with new name to GitHub (temporary)
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Uploading renamed file...\n"
+                    f"{ProgressBar.circular(60)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                encoded = base64.b64encode(content).decode('utf-8')
+                new_path = f"user_files/{user_id}/{new_name}"
+                new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
+                headers = {
+                    "Authorization": f"token {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github.v3+json"
+                }
+                
+                # Check if new name already exists
+                sha = None
+                try:
+                    check_response = requests.get(new_url, headers=headers)
+                    if check_response.status_code == 200:
+                        sha = check_response.json().get('sha')
+                except:
+                    pass
+                
+                data = {
+                    "message": f"Rename {old_name} to {new_name} by user {user_id}",
+                    "content": encoded,
+                    "branch": GITHUB_BRANCH
+                }
+                if sha:
+                    data["sha"] = sha
+                
+                upload_response = requests.put(new_url, headers=headers, json=data)
+                
+                if upload_response.status_code not in [200, 201]:
+                    msg.edit_text(f"❌ Upload failed: {upload_response.text}")
+                    self.clear_session(user_id)
+                    return
+                
+                # Step 3: Delete old file from GitHub
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Deleting old file...\n"
+                    f"{ProgressBar.circular(80)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                self.github_data.delete_file_from_github(user_id, old_name)
+                
+                # Step 4: Update database
+                self.github_data.delete_user_file(user_id, file_id)
+                self.github_data.add_file(
+                    secrets.token_hex(16),
+                    user_id,
+                    new_name,
+                    file_data['size'],
+                    file_data['file_id'],
+                    new_url
+                )
+                
+                # Step 5: Download renamed file and send to user
+                msg.edit_text(
+                    f"✏️ <b>Renaming file...</b>\n\n"
+                    f"📄 Sending renamed file...\n"
+                    f"{ProgressBar.circular(90)}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                # Download the renamed file
+                download_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{new_path}"
+                download_response = requests.get(download_url)
+                
+                if download_response.status_code == 200:
+                    temp_path = os.path.join(TEMP_DIR, f"{user_id}_{new_name}")
+                    with open(temp_path, 'wb') as f:
+                        f.write(download_response.content)
+                    
+                    # Send the file to user
+                    with open(temp_path, 'rb') as doc:
+                        context.bot.send_document(
+                            chat_id=update.message.chat_id,
+                            document=doc,
+                            filename=new_name,
+                            caption=f"✅ <b>File renamed successfully!</b>\n\n📄 {old_name} → {new_name}",
+                            parse_mode=ParseMode.HTML
+                        )
+                    
+                    # Cleanup temp file
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    # Step 6: Delete from GitHub after sending
+                    msg.edit_text(
+                        f"✏️ <b>Renaming file...</b>\n\n"
+                        f"📄 Deleting from GitHub...\n"
+                        f"{ProgressBar.circular(95)}",
+                        parse_mode=ParseMode.HTML
+                    )
+                    
+                    self.github_data.delete_file_from_github(user_id, new_name)
+                    
+                    # Update database (remove the renamed file since it's been sent and deleted)
+                    files = self.github_data.get_user_files(user_id)
+                    for f in files:
+                        if f.get('name') == new_name:
+                            self.github_data.delete_user_file(user_id, f['id'])
+                            break
+                    
+                    msg.edit_text(
+                        f"✅ <b>File renamed and sent!</b>\n\n"
+                        f"📄 {old_name} → {new_name}\n"
+                        f"🗑️ Deleted from GitHub after sending\n\n"
+                        f"{ProgressBar.circular(100)}",
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    msg.edit_text("❌ Could not download renamed file")
+                
+            except Exception as e:
+                msg.edit_text(f"❌ Error during rename: {str(e)}")
+            
+            self.clear_session(user_id)
+            return
+        
         self.file_handler(update, context)
+
+    # ============================================
+    # PHOTO HANDLER (for thumbnail)
+    # ============================================
+    def photo_handler(self, update: Update, context: CallbackContext):
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        session = self.get_session(user_id)
+        
+        if session and session.get('step') == 'waiting_thumb':
+            photo = update.message.photo[-1]
+            file_obj = context.bot.get_file(photo.file_id)
+            thumb_path = os.path.join(TEMP_DIR, f"{user_id}_thumb.jpg")
+            file_obj.download(thumb_path)
+            
+            self.github_data.update_user(user_id, 'thumbnail_path', thumb_path)
+            self.clear_session(user_id)
+            
+            update.message.reply_text(
+                f"✅ <b>Thumbnail set successfully!</b>\n\n"
+                f"🆔 File ID: <code>{photo.file_id[:30]}...</code>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        self.file_handler(update, context)
+
+    # ============================================
+    # EXTRACT AND SEND - DELETE AFTER SEND
+    # ============================================
+    def extract_and_send(self, update, context, user_id, file_data):
+        query = update.callback_query
+        file_name = file_data['name']
+        
+        query.edit_message_text(f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(0)}")
+        
+        # Download from GitHub
+        github_path = f"user_files/{user_id}/{file_name}"
+        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+        response = requests.get(github_url)
+        
+        if response.status_code != 200:
+            query.edit_message_text("❌ Could not download file from GitHub")
+            return
+        
+        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
+        with open(temp_path, 'wb') as f:
+            f.write(response.content)
+        
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext not in ['.zip', '.rar', '.7z']:
+            query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return
+        
+        try:
+            extract_dir = os.path.join(TEMP_DIR, f"{user_id}_extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            password = self.github_data.get_user_field(user_id, 'archive_password') or None
+            
+            if ext == '.zip':
+                with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                    if password:
+                        zip_ref.setpassword(password.encode())
+                    total = len(zip_ref.namelist())
+                    for i, name in enumerate(zip_ref.namelist()):
+                        zip_ref.extract(name, extract_dir)
+                        if i % 5 == 0:
+                            progress = (i / total) * 100 if total > 0 else 0
+                            query.edit_message_text(
+                                f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(progress)}"
+                            )
+                            
+            elif ext == '.rar':
+                with rarfile.RarFile(temp_path) as rar_ref:
+                    if password:
+                        rar_ref.setpassword(password)
+                    total = len(rar_ref.namelist())
+                    for i, name in enumerate(rar_ref.namelist()):
+                        rar_ref.extract(name, extract_dir)
+                        if i % 5 == 0:
+                            progress = (i / total) * 100 if total > 0 else 0
+                            query.edit_message_text(
+                                f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(progress)}"
+                            )
+                            
+            elif ext == '.7z':
+                with py7zr.SevenZipFile(temp_path, mode='r', password=password) as sz_ref:
+                    files = sz_ref.getnames()
+                    total = len(files)
+                    for i, name in enumerate(files):
+                        sz_ref.extract(targets=[name], path=extract_dir)
+                        if i % 2 == 0:
+                            progress = (i / total) * 100 if total > 0 else 0
+                            query.edit_message_text(
+                                f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(progress)}"
+                            )
+            
+            query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
+            
+            extracted = []
+            for root, dirs, files in os.walk(extract_dir):
+                for f in files:
+                    extracted.append(os.path.join(root, f))
+            
+            if extracted:
+                context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"📤 Sending {len(extracted)} extracted files..."
+                )
+                
+                thumb = self.github_data.get_user_field(user_id, 'thumbnail_path')
+                prefix = self.github_data.get_user_field(user_id, 'file_prefix')
+                
+                for f_path in extracted:
+                    if os.path.getsize(f_path) < MAX_FILE_SIZE:
+                        file_name_out = os.path.basename(f_path)
+                        if prefix:
+                            file_name_out = f"{prefix}{file_name_out}"
+                        
+                        with open(f_path, 'rb') as doc:
+                            context.bot.send_document(
+                                chat_id=query.message.chat_id,
+                                document=doc,
+                                filename=file_name_out,
+                                thumbnail=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
+                            )
+            
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            
+        except Exception as e:
+            query.edit_message_text(f"❌ Extraction error: {str(e)}")
+        
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        # DELETE FILE FROM GITHUB AFTER SENDING
+        self.github_data.delete_file_from_github(user_id, file_name)
+        self.github_data.delete_user_file(user_id, file_data['id'])
+
+    # ============================================
+    # EXTRACT SINGLE FILE
+    # ============================================
+    def extract_file(self, update, context, user_id, file_id):
+        file_data = self.github_data.get_file(user_id, file_id)
+        if not file_data:
+            update.callback_query.edit_message_text("❌ File not found")
+            return
+        self.extract_and_send(update, context, user_id, file_data)
+
+    # ============================================
+    # EXTRACT ALL FILES
+    # ============================================
+    def extract_all_files(self, update, context, user_id):
+        query = update.callback_query
+        files = self.github_data.get_user_files(user_id)
+        
+        if not files:
+            query.edit_message_text("❌ No files to extract.")
+            return
+        
+        for file_data in files:
+            self.extract_and_send(update, context, user_id, file_data)
+        
+        query.edit_message_text("✅ All files extracted and sent!")
+
+    # ============================================
+    # COMPRESS AND SEND - DELETE AFTER SEND
+    # ============================================
+    def compress_and_send(self, update, context, user_id, file_data, format_type):
+        query = update.callback_query
+        file_name = file_data['name']
+        
+        query.edit_message_text(f"🗜️ Compressing {file_name} to {format_type.upper()}...\n\n{ProgressBar.circular(0)}")
+        
+        # Download from GitHub
+        github_path = f"user_files/{user_id}/{file_name}"
+        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+        response = requests.get(github_url)
+        
+        if response.status_code != 200:
+            query.edit_message_text("❌ Could not download file from GitHub")
+            return
+        
+        temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
+        with open(temp_path, 'wb') as f:
+            f.write(response.content)
+        
+        # Create archive
+        base_name = os.path.splitext(file_name)[0]
+        archive_name = f"{base_name}.{format_type}"
+        archive_path = os.path.join(TEMP_DIR, f"{user_id}_{archive_name}")
+        
+        password = self.github_data.get_user_field(user_id, 'archive_password') or None
+        
+        try:
+            if format_type == 'zip':
+                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    if password:
+                        zipf.setpassword(password.encode())
+                    zipf.write(temp_path, os.path.basename(file_name))
+                    
+            elif format_type == '7z':
+                with py7zr.SevenZipFile(archive_path, 'w', password=password) as szf:
+                    szf.write(temp_path, os.path.basename(file_name))
+            
+            # Send compressed file
+            prefix = self.github_data.get_user_field(user_id, 'file_prefix')
+            if prefix:
+                archive_name = f"{prefix}{archive_name}"
+            
+            with open(archive_path, 'rb') as doc:
+                context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=doc,
+                    filename=archive_name
+                )
+            
+            query.edit_message_text(f"✅ Compression complete!\n\n{ProgressBar.circular(100)}")
+            
+        except Exception as e:
+            query.edit_message_text(f"❌ Compression error: {str(e)}")
+        
+        # Cleanup temp files
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+        
+        # DELETE ORIGINAL FILE FROM GITHUB AFTER SENDING
+        self.github_data.delete_file_from_github(user_id, file_name)
+        self.github_data.delete_user_file(user_id, file_data['id'])
+
+    # ============================================
+    # COMPRESS SINGLE WITH FORMAT
+    # ============================================
+    def compress_single_with_format(self, update, context, user_id, file_id, format_type):
+        file_data = self.github_data.get_file(user_id, file_id)
+        if not file_data:
+            update.callback_query.edit_message_text("❌ File not found")
+            return
+        self.compress_and_send(update, context, user_id, file_data, format_type)
+
+    # ============================================
+    # COMPRESS SINGLE FILE
+    # ============================================
+    def compress_file(self, update, context, user_id, file_id):
+        query = update.callback_query
+        file_data = self.github_data.get_file(user_id, file_id)
+        
+        if not file_data:
+            query.edit_message_text("❌ File not found")
+            return
+        
+        kb = [
+            [InlineKeyboardButton("📦 ZIP", callback_data=f"compress_single_zip_{file_id}")],
+            [InlineKeyboardButton("📦 7Z", callback_data=f"compress_single_7z_{file_id}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
+        ]
+        
+        query.edit_message_text(
+            f"🗜️ <b>Compress: {file_data['name']}</b>\n\n"
+            f"Choose compression format:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
+
+    # ============================================
+    # COMPRESS ALL WITH FORMAT
+    # ============================================
+    def compress_all_with_format(self, update, context, user_id, format_type):
+        query = update.callback_query
+        files = self.github_data.get_user_files(user_id)
+        
+        if not files:
+            query.edit_message_text("❌ No files to compress.")
+            return
+        
+        for file_data in files:
+            self.compress_and_send(update, context, user_id, file_data, format_type)
+        
+        query.edit_message_text("✅ All files compressed and sent!")
+
+    # ============================================
+    # COMPRESS ALL FILES
+    # ============================================
+    def compress_all_files(self, update, context, user_id):
+        query = update.callback_query
+        
+        kb = [
+            [InlineKeyboardButton("📦 ZIP", callback_data="compress_all_zip")],
+            [InlineKeyboardButton("📦 7Z", callback_data="compress_all_7z")],
+            [InlineKeyboardButton("🔙 Back", callback_data="my_files")]
+        ]
+        
+        query.edit_message_text(
+            "🗜️ <b>Compress All Files</b>\n\n"
+            "Choose compression format:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.HTML
+        )
 
     # ============================================
     # RUN BOT
     # ============================================
     def run(self):
-        logger.info('🚀 Starting Archive Bot...')
+        logger.info('🚀 Starting Archive Bot with direct CDN download...')
+        logger.info(f'📁 Data stored in: {GITHUB_OWNER}/{GITHUB_REPO}')
+        logger.info('📦 Max file size: 2GB (using direct CDN streaming)')
+        logger.info('🔑 No API ID/Hash required - uses bot token only')
         
         try:
             updater = Updater(BOT_TOKEN, use_context=True)
@@ -1189,7 +1608,12 @@ class ArchiveBot:
             
             bot_info = updater.bot.get_me()
             self.bot_username = bot_info.username
+            self.bot_id = bot_info.id
             logger.info(f'✅ Bot running: @{self.bot_username}')
+            
+            updater.bot.set_my_commands([
+                ('start', '🚀 Start the bot'),
+            ])
             
             dp.add_handler(CommandHandler('start', self.start_command))
             dp.add_handler(MessageHandler(Filters.document, self.file_handler))
@@ -1198,20 +1622,26 @@ class ArchiveBot:
             dp.add_handler(CallbackQueryHandler(self.callback_handler))
             
             logger.info('✅ Bot is ready!')
+            
             updater.start_polling()
+            logger.info('🔄 Polling started...')
+            
             updater.idle()
             
         except Exception as e:
-            logger.error(f'❌ Error: {e}')
+            logger.error(f'❌ Bot error: {e}')
             raise
 
 
+# ============================================
+# MAIN
+# ============================================
 if __name__ == '__main__':
     try:
         bot = ArchiveBot()
         bot.run()
     except KeyboardInterrupt:
-        logger.info('🛑 Bot stopped')
+        logger.info('🛑 Bot stopped by user')
     except Exception as e:
         logger.error(f'❌ Fatal error: {e}')
         sys.exit(1)
