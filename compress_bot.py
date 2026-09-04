@@ -65,8 +65,17 @@ health_app = Flask(__name__)
 @health_app.route('/')
 @health_app.route('/health')
 @health_app.route('/health/')
+@health_app.route('/health%20')  # Handle the URL with space encoding
+@health_app.route('/health%20/')
 def health_check():
     return "OK", 200
+
+@health_app.errorhandler(404)
+def not_found(e):
+    # Return 200 for any /health* path to keep Render happy
+    if request.path.startswith('/health'):
+        return "OK", 200
+    return "Not Found", 404
 
 
 # ============================================
