@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - WITH HEALTH CHECK
+# TELEGRAM ARCHIVE BOT - FULLY FIXED
 # Compatible with Render.com Web Service
 # ============================================
 
@@ -23,7 +23,7 @@ from typing import Optional, Dict, List
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request
 
 load_dotenv()
 
@@ -64,6 +64,7 @@ health_app = Flask(__name__)
 
 @health_app.route('/')
 @health_app.route('/health')
+@health_app.route('/health/')
 def health_check():
     return "OK", 200
 
@@ -142,6 +143,87 @@ class GitHubDataManager:
         except:
             return False
 
+    # ============================================
+    # USER DATA
+    # ============================================
+    def get_user(self, user_id: int) -> Optional[Dict]:
+        """Get user data from GitHub"""
+        return self._get_file_content(f"data/users/{user_id}.json")
+
+    def create_user(self, user_id: int, username: str, first_name: str):
+        user_data = {
+            "user_id": user_id,
+            "username": username or '',
+            "first_name": first_name,
+            "file_prefix": "",
+            "archive_password": "",
+            "thumbnail_path": "",
+            "created_at": datetime.now().isoformat()
+        }
+        self._update_file(
+            f"data/users/{user_id}.json",
+            user_data,
+            f"Create user {user_id}"
+        )
+
+    def update_user(self, user_id: int, field: str, value: str):
+        user_data = self.get_user(user_id)
+        if user_data:
+            user_data[field] = value
+            self._update_file(
+                f"data/users/{user_id}.json",
+                user_data,
+                f"Update user {user_id} - {field}"
+            )
+
+    def get_user_field(self, user_id: int, field: str) -> str:
+        user_data = self.get_user(user_id)
+        if user_data:
+            return user_data.get(field, '')
+        return ''
+
+    # ============================================
+    # SESSION DATA
+    # ============================================
+    def get_session(self, user_id: int) -> dict:
+        data = self._get_file_content(f"data/sessions/{user_id}.json")
+        return data if data else {}
+
+    def save_session(self, user_id: int, session_data: dict):
+        self._update_file(
+            f"data/sessions/{user_id}.json",
+            session_data,
+            f"Save session for user {user_id}"
+        )
+
+    def delete_session(self, user_id: int):
+        self._delete_file(
+            f"data/sessions/{user_id}.json",
+            f"Delete session for user {user_id}"
+        )
+
+    # ============================================
+    # FILE DATA
+    # ============================================
+    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
+        user_files = self.get_user_files(user_id)
+        file_data = {
+            "id": file_id,
+            "user_id": user_id,
+            "name": name,
+            "size": size,
+            "file_id": telegram_file_id,
+            "github_path": github_path,
+            "created_at": datetime.now().isoformat(),
+            "is_active": 1
+        }
+        user_files.append(file_data)
+        self._update_file(
+            f"data/files/{user_id}.json",
+            {"files": user_files},
+            f"Add file {name} for user {user_id}"
+        )
+
     def get_user_files(self, user_id: int) -> List[Dict]:
         data = self._get_file_content(f"data/files/{user_id}.json")
         if data and data.get('files'):
@@ -155,57 +237,22 @@ class GitHubDataManager:
                 return f
         return None
 
-    def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
-        path = f"user_files/{user_id}/{file_name}"
-        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
-
     def delete_user_file(self, user_id: int, file_id: str):
-        files = self.get_user_files(user_id)
-        for f in files:
+        user_files = self.get_user_files(user_id)
+        for f in user_files:
             if f.get('id') == file_id:
                 f['is_active'] = 0
                 self._update_file(
                     f"data/files/{user_id}.json",
-                    {"files": files},
+                    {"files": user_files},
                     f"Delete file {file_id} for user {user_id}"
                 )
                 return True
         return False
 
-    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
-        files = self.get_user_files(user_id)
-        file_data = {
-            "id": file_id,
-            "user_id": user_id,
-            "name": name,
-            "size": size,
-            "file_id": telegram_file_id,
-            "github_path": github_path,
-            "created_at": datetime.now().isoformat(),
-            "is_active": 1
-        }
-        files.append(file_data)
-        self._update_file(
-            f"data/files/{user_id}.json",
-            {"files": files},
-            f"Add file {name} for user {user_id}"
-        )
-
-    def get_user_field(self, user_id: int, field: str) -> str:
-        data = self._get_file_content(f"data/users/{user_id}.json")
-        if data:
-            return data.get(field, '')
-        return ''
-
-    def update_user(self, user_id: int, field: str, value: str):
-        data = self._get_file_content(f"data/users/{user_id}.json")
-        if data:
-            data[field] = value
-            self._update_file(
-                f"data/users/{user_id}.json",
-                data,
-                f"Update user {user_id} - {field}"
-            )
+    def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
+        path = f"user_files/{user_id}/{file_name}"
+        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
 
 
 # ============================================
@@ -1480,7 +1527,7 @@ class ArchiveBot:
         try:
             # Start health check server in background thread
             def run_health_server():
-                health_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+                health_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False, threaded=True)
             
             health_thread = threading.Thread(target=run_health_server, daemon=True)
             health_thread.start()
