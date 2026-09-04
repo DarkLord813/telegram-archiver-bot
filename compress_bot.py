@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - WITH DEBUG LOGGING
+# TELEGRAM ARCHIVE BOT - FINAL FIXED VERSION
 # Compatible with Render.com Web Service
 # ============================================
 
@@ -54,10 +54,10 @@ PORT = int(os.getenv('PORT', 8080))
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Configure detailed logging
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Set to DEBUG for more details
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ def not_found(e):
 
 
 # ============================================
-# GITHUB DATA MANAGER WITH DEBUG LOGGING
+# GITHUB DATA MANAGER
 # ============================================
 class GitHubDataManager:
     def __init__(self, token: str, owner: str, repo: str, branch: str = 'main'):
@@ -93,39 +93,25 @@ class GitHubDataManager:
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json"
         }
+        self.raw_base_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}"
         logger.info(f"📁 GitHub initialized: {owner}/{repo} (branch: {branch})")
 
     def _get_file_content(self, path: str) -> Optional[dict]:
-        """Get file content from GitHub with debug logging"""
         try:
             url = f"{self.base_url}/{path}"
-            logger.debug(f"📥 GitHub GET: {url}")
             response = requests.get(url, headers=self.headers)
-            logger.debug(f"📥 Response status: {response.status_code}")
-            
             if response.status_code == 200:
                 content = response.json()
                 if content.get('content'):
                     decoded = base64.b64decode(content['content']).decode('utf-8')
-                    logger.debug(f"✅ Successfully fetched content from {path}")
                     return json.loads(decoded)
-                else:
-                    logger.warning(f"⚠️ No content in response from {path}")
-            else:
-                logger.warning(f"⚠️ Failed to get {path}: Status {response.status_code}")
-                logger.debug(f"Response: {response.text[:200]}")
             return None
-        except Exception as e:
-            logger.error(f"❌ Error getting file content from {path}: {e}")
-            logger.error(traceback.format_exc())
+        except:
             return None
 
     def _update_file(self, path: str, data: dict, message: str) -> bool:
-        """Update or create a file on GitHub with debug logging"""
         try:
             url = f"{self.base_url}/{path}"
-            logger.debug(f"📤 GitHub PUT: {url}")
-            
             content = json.dumps(data, indent=2)
             encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
             
@@ -134,7 +120,6 @@ class GitHubDataManager:
                 response = requests.get(url, headers=self.headers)
                 if response.status_code == 200:
                     sha = response.json().get('sha')
-                    logger.debug(f"📤 File exists, SHA: {sha[:8]}...")
             except:
                 pass
             
@@ -147,28 +132,16 @@ class GitHubDataManager:
                 upload_data["sha"] = sha
             
             response = requests.put(url, headers=self.headers, json=upload_data)
-            logger.debug(f"📤 PUT response: {response.status_code}")
-            
-            if response.status_code in [200, 201]:
-                logger.info(f"✅ Successfully updated {path}")
-                return True
-            else:
-                logger.error(f"❌ Failed to update {path}: {response.status_code}")
-                logger.debug(f"Response: {response.text[:200]}")
-                return False
+            return response.status_code in [200, 201]
         except Exception as e:
-            logger.error(f"❌ Error updating file: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error updating file: {e}")
             return False
 
     def _delete_file(self, path: str, message: str) -> bool:
-        """Delete a file from GitHub with debug logging"""
         try:
             url = f"{self.base_url}/{path}"
-            logger.debug(f"🗑️ GitHub DELETE: {url}")
             response = requests.get(url, headers=self.headers)
             if response.status_code != 200:
-                logger.warning(f"⚠️ File not found: {path}")
                 return False
             
             sha = response.json().get('sha')
@@ -178,25 +151,14 @@ class GitHubDataManager:
                 "branch": self.branch
             }
             response = requests.delete(url, headers=self.headers, json=delete_data)
-            logger.debug(f"🗑️ DELETE response: {response.status_code}")
-            
-            if response.status_code in [200, 204]:
-                logger.info(f"✅ Successfully deleted {path}")
-                return True
-            else:
-                logger.error(f"❌ Failed to delete {path}: {response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Error deleting file: {e}")
-            logger.error(traceback.format_exc())
+            return response.status_code in [200, 204]
+        except:
             return False
 
     def get_user(self, user_id: int) -> Optional[Dict]:
-        logger.debug(f"👤 Getting user: {user_id}")
         return self._get_file_content(f"data/users/{user_id}.json")
 
     def create_user(self, user_id: int, username: str, first_name: str):
-        logger.info(f"👤 Creating user: {user_id} ({username})")
         user_data = {
             "user_id": user_id,
             "username": username or '',
@@ -213,7 +175,6 @@ class GitHubDataManager:
         )
 
     def update_user(self, user_id: int, field: str, value: str):
-        logger.debug(f"👤 Updating user {user_id}: {field}={value}")
         user_data = self.get_user(user_id)
         if user_data:
             user_data[field] = value
@@ -230,12 +191,10 @@ class GitHubDataManager:
         return ''
 
     def get_session(self, user_id: int) -> dict:
-        logger.debug(f"📋 Getting session for user: {user_id}")
         data = self._get_file_content(f"data/sessions/{user_id}.json")
         return data if data else {}
 
     def save_session(self, user_id: int, session_data: dict):
-        logger.debug(f"💾 Saving session for user: {user_id}")
         self._update_file(
             f"data/sessions/{user_id}.json",
             session_data,
@@ -243,16 +202,17 @@ class GitHubDataManager:
         )
 
     def delete_session(self, user_id: int):
-        logger.debug(f"🗑️ Deleting session for user: {user_id}")
         self._delete_file(
             f"data/sessions/{user_id}.json",
             f"Delete session for user {user_id}"
         )
 
-    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str, github_path: str):
-        logger.info(f"📄 Adding file: {name} (ID: {file_id}) for user {user_id}")
-        logger.debug(f"📄 File details: size={size}, telegram_file_id={telegram_file_id[:20]}...")
-        
+    def get_file_raw_url(self, user_id: int, file_name: str) -> str:
+        """Get the raw URL for a file"""
+        return f"{self.raw_base_url}/user_files/{user_id}/{file_name}"
+
+    def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str):
+        """Add file to user's file list without github_path (we construct it later)"""
         user_files = self.get_user_files(user_id)
         file_data = {
             "id": file_id,
@@ -260,7 +220,6 @@ class GitHubDataManager:
             "name": name,
             "size": size,
             "file_id": telegram_file_id,
-            "github_path": github_path,
             "created_at": datetime.now().isoformat(),
             "is_active": 1
         }
@@ -273,29 +232,21 @@ class GitHubDataManager:
         logger.info(f"✅ File added: {name} (ID: {file_id})")
 
     def get_user_files(self, user_id: int) -> List[Dict]:
-        logger.debug(f"📋 Getting files for user: {user_id}")
         data = self._get_file_content(f"data/files/{user_id}.json")
         if data and data.get('files'):
-            active_files = [f for f in data['files'] if f.get('is_active', 1) == 1]
-            logger.debug(f"📋 Found {len(active_files)} active files for user {user_id}")
-            return active_files
-        logger.debug(f"📋 No files found for user {user_id}")
+            return [f for f in data['files'] if f.get('is_active', 1) == 1]
         return []
 
     def get_file(self, user_id: int, file_id: str) -> Optional[Dict]:
-        logger.debug(f"🔍 Looking for file: {file_id} for user {user_id}")
         files = self.get_user_files(user_id)
         for f in files:
             if f.get('id') == file_id:
                 logger.info(f"✅ Found file: {f.get('name')} (ID: {file_id})")
-                logger.debug(f"📄 File data: {json.dumps(f, indent=2)}")
                 return f
-        logger.warning(f"❌ File not found: {file_id} for user {user_id}")
-        logger.debug(f"📋 Available files: {[f.get('id') for f in files]}")
+        logger.warning(f"❌ File not found: {file_id}")
         return None
 
     def delete_user_file(self, user_id: int, file_id: str):
-        logger.info(f"🗑️ Deleting file: {file_id} for user {user_id}")
         user_files = self.get_user_files(user_id)
         for f in user_files:
             if f.get('id') == file_id:
@@ -305,41 +256,32 @@ class GitHubDataManager:
                     {"files": user_files},
                     f"Delete file {file_id} for user {user_id}"
                 )
-                logger.info(f"✅ File deleted: {f.get('name')} (ID: {file_id})")
                 return True
-        logger.warning(f"❌ File not found to delete: {file_id}")
         return False
 
     def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
-        logger.info(f"🗑️ Deleting file from GitHub: {file_name} for user {user_id}")
         path = f"user_files/{user_id}/{file_name}"
         return self._delete_file(path, f"Delete {file_name} by user {user_id}")
 
 
 # ============================================
-# DIRECT CDN DOWNLOADER WITH DEBUG LOGGING
+# DIRECT CDN DOWNLOADER
 # ============================================
 class DirectCDNDownloader:
     @staticmethod
     def get_download_url(bot_token: str, file_id: str) -> Optional[str]:
         try:
             url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
-            logger.debug(f"🌐 Getting download URL: {url[:50]}...")
             response = requests.get(url)
             response.raise_for_status()
             data = response.json()
             
             if data.get('ok') and data.get('result'):
                 file_path = data['result']['file_path']
-                download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-                logger.debug(f"🌐 Download URL: {download_url[:80]}...")
-                return download_url
-            else:
-                logger.error(f"❌ Failed to get file info: {data}")
-                return None
+                return f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+            return None
         except Exception as e:
-            logger.error(f"❌ Error getting download URL: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error getting download URL: {e}")
             return None
 
     @staticmethod
@@ -347,10 +289,8 @@ class DirectCDNDownloader:
         try:
             download_url = DirectCDNDownloader.get_download_url(bot_token, file_id)
             if not download_url:
-                logger.error(f"❌ No download URL for file: {file_id}")
                 return False
             
-            logger.info(f"📥 Downloading file: {file_id} to {save_path}")
             if progress_callback:
                 progress_callback(10, "Starting download...")
             
@@ -358,7 +298,6 @@ class DirectCDNDownloader:
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))
-            logger.info(f"📥 File size: {total_size} bytes")
             downloaded = 0
             last_progress = 0
             
@@ -373,35 +312,30 @@ class DirectCDNDownloader:
                                 last_progress = int(progress)
                                 progress_callback(progress, f"Downloading... {int(progress)}%")
             
-            logger.info(f"✅ Download complete: {save_path}")
             if progress_callback:
                 progress_callback(90, "Download complete!")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Download error: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Download error: {e}")
             if os.path.exists(save_path):
                 os.remove(save_path)
             return False
 
 
 # ============================================
-# FAST GITHUB UPLOADER WITH DEBUG LOGGING
+# FAST GITHUB UPLOADER
 # ============================================
 class FastGitHubUploader:
     @staticmethod
     def upload_file(file_path: str, file_name: str, user_id: int, progress_callback=None) -> tuple:
         try:
-            logger.info(f"📤 Uploading file: {file_name} for user {user_id}")
-            
             if progress_callback:
                 progress_callback(10, "Reading file...")
             
             with open(file_path, 'rb') as f:
                 content = f.read()
             
-            logger.debug(f"📤 File size: {len(content)} bytes")
             encoded = base64.b64encode(content).decode('utf-8')
             
             if progress_callback:
@@ -420,7 +354,6 @@ class FastGitHubUploader:
                 check_response = requests.get(github_url, headers=headers)
                 if check_response.status_code == 200:
                     sha = check_response.json().get('sha')
-                    logger.debug(f"📤 File exists, SHA: {sha[:8]}...")
             except:
                 pass
             
@@ -433,20 +366,18 @@ class FastGitHubUploader:
                 data["sha"] = sha
             
             upload_response = requests.put(github_url, headers=headers, json=data)
-            logger.debug(f"📤 Upload response: {upload_response.status_code}")
             
             if upload_response.status_code in [200, 201]:
                 if progress_callback:
                     progress_callback(100, "Upload complete!")
-                logger.info(f"✅ Upload successful: {file_name}")
-                return True, f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+                logger.info(f"✅ Upload successful: {file_name} to {github_path}")
+                return True, github_path
             else:
                 logger.error(f"❌ Upload failed: {upload_response.text}")
                 return False, f"GitHub upload failed: {upload_response.text}"
                 
         except Exception as e:
-            logger.error(f"❌ Upload error: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Upload error: {e}")
             return False, str(e)
 
 
@@ -474,11 +405,10 @@ class ProgressBar:
 
 
 # ============================================
-# BOT HANDLERS WITH DEBUG LOGGING
+# BOT HANDLERS
 # ============================================
 class ArchiveBot:
     def __init__(self):
-        logger.debug("🤖 Initializing ArchiveBot...")
         self.github_data = GitHubDataManager(GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
         self.bot_username = ''
         self.bot_id = 0
@@ -540,13 +470,9 @@ class ArchiveBot:
     def start_command(self, update: Update, context: CallbackContext):
         user_id = self.get_user_id(update)
         if not user_id:
-            logger.warning("⚠️ No user_id found in update")
             return
         
-        logger.info(f"🚀 /start from user: {user_id}")
-        
         if not self.check_force_join(context, user_id):
-            logger.warning(f"🔒 User {user_id} not joined force channel")
             update.message.reply_text(
                 f"🔒 <b>Access Denied</b>\n\n"
                 f"You must join our channel to use this bot!\n\n"
@@ -560,7 +486,6 @@ class ArchiveBot:
         user = update.effective_user
         existing_user = self.github_data.get_user(user_id)
         if not existing_user:
-            logger.info(f"👤 Creating new user: {user_id}")
             self.github_data.create_user(user_id, user.username or '', user.first_name or 'User')
         
         self.clear_session(user_id)
@@ -590,8 +515,6 @@ class ArchiveBot:
         user_id = self.get_user_id(update)
         if not user_id:
             return
-        
-        logger.debug(f"⚙️ Settings menu for user: {user_id}")
         
         prefix = self.github_data.get_user_field(user_id, 'file_prefix')
         password = self.github_data.get_user_field(user_id, 'archive_password')
@@ -625,8 +548,6 @@ class ArchiveBot:
         if not user_id:
             return
         
-        logger.debug(f"📝 Setting prefix for user: {user_id}")
-        
         session = self.get_session(user_id)
         session['step'] = 'waiting_prefix'
         self.save_session(user_id, session)
@@ -646,8 +567,6 @@ class ArchiveBot:
         user_id = self.get_user_id(update)
         if not user_id:
             return
-        
-        logger.debug(f"🔑 Setting password for user: {user_id}")
         
         session = self.get_session(user_id)
         session['step'] = 'waiting_password'
@@ -670,8 +589,6 @@ class ArchiveBot:
         if not user_id:
             return
         
-        logger.debug(f"🖼️ Setting thumbnail for user: {user_id}")
-        
         session = self.get_session(user_id)
         session['step'] = 'waiting_thumb'
         self.save_session(user_id, session)
@@ -693,8 +610,6 @@ class ArchiveBot:
         if not user_id:
             return
         
-        logger.debug(f"🗑️ Removing thumbnail for user: {user_id}")
-        
         self.github_data.update_user(user_id, 'thumbnail_path', '')
         query.edit_message_text(
             "🗑️ Thumbnail removed!",
@@ -713,7 +628,6 @@ class ArchiveBot:
         
         user_id = self.get_user_id(update)
         if not user_id:
-            logger.warning("⚠️ No user_id in callback")
             return
         
         data = query.data
@@ -824,7 +738,6 @@ class ArchiveBot:
             files = session.get('files', [])
             
             if not files:
-                logger.warning(f"⚠️ No files to upload for user {user_id}")
                 query.edit_message_text(
                     "❌ No files uploaded yet!",
                     reply_markup=InlineKeyboardMarkup([
@@ -833,8 +746,6 @@ class ArchiveBot:
                     ])
                 )
                 return
-            
-            logger.info(f"📤 Uploading {len(files)} files for user {user_id}")
             
             query.edit_message_text(
                 f"📤 <b>Uploading {len(files)} files to GitHub...</b>\n\n"
@@ -862,16 +773,11 @@ class ArchiveBot:
                     except:
                         pass
                 
-                logger.info(f"📥 Downloading file {file_name} (ID: {file_id})")
                 download_success = DirectCDNDownloader.download_file(
-                    BOT_TOKEN, 
-                    file_id, 
-                    temp_path,
-                    download_progress
+                    BOT_TOKEN, file_id, temp_path, download_progress
                 )
                 
                 if not download_success:
-                    logger.error(f"❌ Failed to download {file_name}")
                     query.edit_message_text(f"❌ Failed to download {file_name}")
                     continue
                 
@@ -888,26 +794,24 @@ class ArchiveBot:
                     except:
                         pass
                 
-                success, result = FastGitHubUploader.upload_file(
+                success, github_path = FastGitHubUploader.upload_file(
                     temp_path, file_name, user_id, upload_progress
                 )
                 
                 if success:
                     unique_id = secrets.token_hex(16)
-                    self.github_data.add_file(unique_id, user_id, file_name, file_size, file_id, result)
+                    self.github_data.add_file(unique_id, user_id, file_name, file_size, file_id)
                     uploaded_count += 1
-                    logger.info(f"✅ Uploaded: {file_name}")
+                    logger.info(f"✅ Uploaded: {file_name} (path: {github_path})")
                 else:
-                    logger.error(f"❌ Failed to upload {file_name}: {result}")
-                    query.edit_message_text(f"❌ Failed to upload {file_name}: {result}")
+                    logger.error(f"❌ Failed to upload {file_name}: {github_path}")
+                    query.edit_message_text(f"❌ Failed to upload {file_name}: {github_path}")
                 
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
             
             session['files'] = []
             self.save_session(user_id, session)
-            
-            logger.info(f"✅ Upload complete: {uploaded_count}/{total_files} files")
             
             kb = [
                 [InlineKeyboardButton("📦 Extract All", callback_data="extract_all")],
@@ -929,7 +833,6 @@ class ArchiveBot:
             files = self.github_data.get_user_files(user_id)
             
             if not files:
-                logger.info(f"📂 No files for user {user_id}")
                 query.edit_message_text(
                     "📂 <b>My Files</b>\n\n"
                     "No files uploaded yet.\n\n"
@@ -941,8 +844,6 @@ class ArchiveBot:
                     parse_mode=ParseMode.HTML
                 )
                 return
-            
-            logger.info(f"📂 Showing {len(files)} files for user {user_id}")
             
             text = f"📂 <b>My Files</b> ({len(files)})\n\n"
             btns = []
@@ -972,16 +873,11 @@ class ArchiveBot:
         # ---- DELETE FILE ----
         if data.startswith("delete_"):
             file_id = data.replace("delete_", "")
-            logger.info(f"🗑️ Delete file: {file_id} for user {user_id}")
             file_data = self.github_data.get_file(user_id, file_id)
             
             if file_data:
-                logger.info(f"🗑️ Deleting {file_data['name']} from GitHub")
                 self.github_data.delete_file_from_github(user_id, file_data['name'])
                 self.github_data.delete_user_file(user_id, file_id)
-                logger.info(f"✅ File deleted: {file_data['name']}")
-            else:
-                logger.warning(f"❌ File not found for deletion: {file_id}")
             
             query.edit_message_text(
                 "✅ File deleted!",
@@ -995,53 +891,45 @@ class ArchiveBot:
         # ---- COMPRESS SINGLE WITH FORMAT ----
         if data.startswith("compress_single_zip_"):
             file_id = data.replace("compress_single_zip_", "")
-            logger.info(f"🗜️ Compress single file to ZIP: {file_id}")
             self.compress_single_with_format(update, context, user_id, file_id, "zip")
             return
         
         if data.startswith("compress_single_7z_"):
             file_id = data.replace("compress_single_7z_", "")
-            logger.info(f"🗜️ Compress single file to 7Z: {file_id}")
             self.compress_single_with_format(update, context, user_id, file_id, "7z")
             return
         
         # ---- COMPRESS ALL WITH FORMAT ----
         if data.startswith("compress_all_"):
             format_type = data.replace("compress_all_", "")
-            logger.info(f"🗜️ Compress all files to {format_type.upper()}")
             self.compress_all_with_format(update, context, user_id, format_type)
             return
         
         # ---- EXTRACT SINGLE FILE ----
         if data.startswith("extract_") and data != "extract_all":
             file_id = data.replace("extract_", "")
-            logger.info(f"📦 Extract file: {file_id}")
             self.extract_file(update, context, user_id, file_id)
             return
         
         # ---- EXTRACT ALL FILES ----
         if data == "extract_all":
-            logger.info(f"📦 Extract all files for user {user_id}")
             self.extract_all_files(update, context, user_id)
             return
         
         # ---- COMPRESS SINGLE FILE ----
         if data.startswith("compress_") and data != "compress_all":
             file_id = data.replace("compress_", "")
-            logger.info(f"🗜️ Compress file: {file_id}")
             self.compress_file(update, context, user_id, file_id)
             return
         
         # ---- COMPRESS ALL FILES ----
         if data == "compress_all":
-            logger.info(f"🗜️ Compress all files for user {user_id}")
             self.compress_all_files(update, context, user_id)
             return
         
         # ---- RENAME FILE ----
         if data.startswith("rename_"):
             file_id = data.replace("rename_", "")
-            logger.info(f"✏️ Rename file: {file_id}")
             session = self.get_session(user_id)
             session['step'] = 'waiting_rename'
             session['rename_file_id'] = file_id
@@ -1060,7 +948,6 @@ class ArchiveBot:
             return
         
         if data == "cancel":
-            logger.info(f"❌ Cancelled operation for user {user_id}")
             self.clear_session(user_id)
             query.edit_message_text(
                 "❌ Cancelled",
@@ -1077,8 +964,6 @@ class ArchiveBot:
         query = update.callback_query
         user = self.github_data.get_user(user_id)
         name = user['first_name'] if user else 'User'
-        
-        logger.debug(f"📋 Showing main menu for user {user_id}")
         
         kb = [
             [InlineKeyboardButton("📤 Upload Files", callback_data="upload")],
@@ -1149,10 +1034,7 @@ class ArchiveBot:
             msg.reply_text("❌ Please send a document, photo, or video.")
             return
         
-        logger.info(f"📄 File received: {file_name} ({self.format_size(file_size)}) for user {user_id}")
-        
         if file_size > MAX_FILE_SIZE:
-            logger.warning(f"⚠️ File too large: {file_name} ({file_size} bytes)")
             msg.reply_text(f"❌ File too large ({self.format_size(file_size)}). Max: 2GB")
             return
         
@@ -1200,7 +1082,6 @@ class ArchiveBot:
         session = self.get_session(user_id)
         
         if session and session.get('step') == 'waiting_prefix':
-            logger.info(f"📝 Setting prefix for user {user_id}: {text}")
             self.github_data.update_user(user_id, 'file_prefix', text)
             self.clear_session(user_id)
             update.message.reply_text(
@@ -1214,7 +1095,6 @@ class ArchiveBot:
             return
         
         if session and session.get('step') == 'waiting_password':
-            logger.info(f"🔑 Setting password for user {user_id}")
             self.github_data.update_user(user_id, 'archive_password', text)
             self.clear_session(user_id)
             update.message.reply_text(
@@ -1232,12 +1112,9 @@ class ArchiveBot:
         # ============================================
         if session and session.get('step') == 'waiting_rename':
             file_id = session.get('rename_file_id')
-            logger.info(f"✏️ Renaming file {file_id} to {text}")
-            
             file_data = self.github_data.get_file(user_id, file_id)
             
             if not file_data:
-                logger.error(f"❌ File not found for rename: {file_id}")
                 update.message.reply_text("❌ File not found")
                 self.clear_session(user_id)
                 return
@@ -1253,12 +1130,10 @@ class ArchiveBot:
             )
             
             try:
-                # Download from GitHub
-                github_path = f"user_files/{user_id}/{old_name}"
-                github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
-                logger.info(f"📥 Downloading from GitHub: {github_url}")
-                response = requests.get(github_url)
-                logger.debug(f"📥 Download response: {response.status_code}")
+                # Download from GitHub using raw URL
+                raw_url = self.github_data.get_file_raw_url(user_id, old_name)
+                logger.info(f"📥 Downloading from GitHub: {raw_url}")
+                response = requests.get(raw_url)
                 
                 if response.status_code != 200:
                     logger.error(f"❌ Could not download file from GitHub: {response.status_code}")
@@ -1274,7 +1149,6 @@ class ArchiveBot:
                 )
                 
                 content = response.content
-                logger.debug(f"📥 Downloaded {len(content)} bytes")
                 
                 # Upload with new name
                 msg.edit_text(
@@ -1297,7 +1171,6 @@ class ArchiveBot:
                     check_response = requests.get(new_url, headers=headers)
                     if check_response.status_code == 200:
                         sha = check_response.json().get('sha')
-                        logger.debug(f"📤 File exists, SHA: {sha[:8]}...")
                 except:
                     pass
                 
@@ -1310,11 +1183,9 @@ class ArchiveBot:
                     data["sha"] = sha
                 
                 upload_response = requests.put(new_url, headers=headers, json=data)
-                logger.debug(f"📤 Upload response: {upload_response.status_code}")
                 
                 if upload_response.status_code not in [200, 201]:
-                    logger.error(f"❌ Upload failed: {upload_response.text}")
-                    msg.edit_text(f"❌ Upload failed: {upload_response.text}")
+                    msg.edit_text(f"❌ Upload failed")
                     self.clear_session(user_id)
                     return
                 
@@ -1333,8 +1204,7 @@ class ArchiveBot:
                     user_id,
                     new_name,
                     file_data['size'],
-                    file_data['file_id'],
-                    new_url
+                    file_data['file_id']
                 )
                 
                 # Send renamed file
@@ -1345,7 +1215,7 @@ class ArchiveBot:
                     parse_mode=ParseMode.HTML
                 )
                 
-                download_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{new_path}"
+                download_url = self.github_data.get_file_raw_url(user_id, new_name)
                 download_response = requests.get(download_url)
                 
                 if download_response.status_code == 200:
@@ -1366,13 +1236,6 @@ class ArchiveBot:
                         os.remove(temp_path)
                     
                     # Delete from GitHub after sending
-                    msg.edit_text(
-                        f"✏️ <b>Renaming file...</b>\n\n"
-                        f"📄 Deleting from GitHub...\n"
-                        f"{ProgressBar.circular(95)}",
-                        parse_mode=ParseMode.HTML
-                    )
-                    
                     self.github_data.delete_file_from_github(user_id, new_name)
                     
                     # Remove from database
@@ -1382,7 +1245,6 @@ class ArchiveBot:
                             self.github_data.delete_user_file(user_id, f['id'])
                             break
                     
-                    logger.info(f"✅ Rename complete: {old_name} → {new_name}")
                     msg.edit_text(
                         f"✅ <b>File renamed and sent!</b>\n\n"
                         f"📄 {old_name} → {new_name}\n"
@@ -1391,12 +1253,10 @@ class ArchiveBot:
                         parse_mode=ParseMode.HTML
                     )
                 else:
-                    logger.error(f"❌ Could not download renamed file: {download_response.status_code}")
                     msg.edit_text("❌ Could not download renamed file")
                 
             except Exception as e:
                 logger.error(f"❌ Error during rename: {e}")
-                logger.error(traceback.format_exc())
                 msg.edit_text(f"❌ Error during rename: {str(e)}")
             
             self.clear_session(user_id)
@@ -1416,8 +1276,6 @@ class ArchiveBot:
         
         if session and session.get('step') == 'waiting_thumb':
             photo = update.message.photo[-1]
-            logger.info(f"🖼️ Setting thumbnail for user {user_id}")
-            
             file_obj = context.bot.get_file(photo.file_id)
             thumb_path = os.path.join(TEMP_DIR, f"{user_id}_thumb.jpg")
             file_obj.download(thumb_path)
@@ -1445,21 +1303,18 @@ class ArchiveBot:
         query = update.callback_query
         file_name = file_data['name']
         
-        logger.info(f"📦 Extracting file: {file_name} for user {user_id}")
-        
         query.edit_message_text(f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(0)}")
         
-        # Download from GitHub
-        github_path = f"user_files/{user_id}/{file_name}"
-        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
-        logger.info(f"📥 Downloading from GitHub: {github_url}")
+        # Download from GitHub using raw URL
+        raw_url = self.github_data.get_file_raw_url(user_id, file_name)
+        logger.info(f"📥 Downloading from GitHub: {raw_url}")
         
-        response = requests.get(github_url)
-        logger.debug(f"📥 Download response: {response.status_code}")
+        response = requests.get(raw_url)
+        logger.info(f"📥 Download response: {response.status_code}")
         
         if response.status_code != 200:
             logger.error(f"❌ Could not download file from GitHub: {response.status_code}")
-            query.edit_message_text("❌ Could not download file from GitHub")
+            query.edit_message_text(f"❌ Could not download file from GitHub (Status: {response.status_code})")
             return
         
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
@@ -1468,7 +1323,6 @@ class ArchiveBot:
         
         ext = os.path.splitext(file_name)[1].lower()
         if ext not in ['.zip', '.rar', '.7z']:
-            logger.warning(f"⚠️ Not an archive file: {file_name}")
             query.edit_message_text("❌ Not an archive file. Supported: ZIP, RAR, 7z")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -1518,7 +1372,6 @@ class ArchiveBot:
                                 f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(progress)}"
                             )
             
-            logger.info(f"✅ Extraction complete: {file_name}")
             query.edit_message_text(f"✅ Extraction complete!\n\n{ProgressBar.circular(100)}")
             
             extracted = []
@@ -1553,14 +1406,12 @@ class ArchiveBot:
             
         except Exception as e:
             logger.error(f"❌ Extraction error: {e}")
-            logger.error(traceback.format_exc())
             query.edit_message_text(f"❌ Extraction error: {str(e)}")
         
         if os.path.exists(temp_path):
             os.remove(temp_path)
         
         # DELETE FILE FROM GITHUB AFTER SENDING
-        logger.info(f"🗑️ Deleting {file_name} from GitHub after sending")
         self.github_data.delete_file_from_github(user_id, file_name)
         self.github_data.delete_user_file(user_id, file_data['id'])
 
@@ -1570,7 +1421,6 @@ class ArchiveBot:
     def extract_file(self, update, context, user_id, file_id):
         file_data = self.github_data.get_file(user_id, file_id)
         if not file_data:
-            logger.error(f"❌ File not found for extraction: {file_id}")
             update.callback_query.edit_message_text("❌ File not found")
             return
         self.extract_and_send(update, context, user_id, file_data)
@@ -1583,11 +1433,8 @@ class ArchiveBot:
         files = self.github_data.get_user_files(user_id)
         
         if not files:
-            logger.warning(f"⚠️ No files to extract for user {user_id}")
             query.edit_message_text("❌ No files to extract.")
             return
-        
-        logger.info(f"📦 Extracting {len(files)} files for user {user_id}")
         
         for file_data in files:
             self.extract_and_send(update, context, user_id, file_data)
@@ -1601,21 +1448,18 @@ class ArchiveBot:
         query = update.callback_query
         file_name = file_data['name']
         
-        logger.info(f"🗜️ Compressing file: {file_name} to {format_type.upper()} for user {user_id}")
-        
         query.edit_message_text(f"🗜️ Compressing {file_name} to {format_type.upper()}...\n\n{ProgressBar.circular(0)}")
         
-        # Download from GitHub
-        github_path = f"user_files/{user_id}/{file_name}"
-        github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
-        logger.info(f"📥 Downloading from GitHub: {github_url}")
+        # Download from GitHub using raw URL
+        raw_url = self.github_data.get_file_raw_url(user_id, file_name)
+        logger.info(f"📥 Downloading from GitHub: {raw_url}")
         
-        response = requests.get(github_url)
-        logger.debug(f"📥 Download response: {response.status_code}")
+        response = requests.get(raw_url)
+        logger.info(f"📥 Download response: {response.status_code}")
         
         if response.status_code != 200:
             logger.error(f"❌ Could not download file from GitHub: {response.status_code}")
-            query.edit_message_text("❌ Could not download file from GitHub")
+            query.edit_message_text(f"❌ Could not download file from GitHub (Status: {response.status_code})")
             return
         
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
@@ -1652,12 +1496,10 @@ class ArchiveBot:
                     filename=archive_name
                 )
             
-            logger.info(f"✅ Compression complete: {file_name} → {archive_name}")
             query.edit_message_text(f"✅ Compression complete!\n\n{ProgressBar.circular(100)}")
             
         except Exception as e:
             logger.error(f"❌ Compression error: {e}")
-            logger.error(traceback.format_exc())
             query.edit_message_text(f"❌ Compression error: {str(e)}")
         
         # Cleanup temp files
@@ -1667,7 +1509,6 @@ class ArchiveBot:
             os.remove(archive_path)
         
         # DELETE ORIGINAL FILE FROM GITHUB AFTER SENDING
-        logger.info(f"🗑️ Deleting {file_name} from GitHub after compression")
         self.github_data.delete_file_from_github(user_id, file_name)
         self.github_data.delete_user_file(user_id, file_data['id'])
 
@@ -1677,7 +1518,6 @@ class ArchiveBot:
     def compress_single_with_format(self, update, context, user_id, file_id, format_type):
         file_data = self.github_data.get_file(user_id, file_id)
         if not file_data:
-            logger.error(f"❌ File not found for compression: {file_id}")
             update.callback_query.edit_message_text("❌ File not found")
             return
         self.compress_and_send(update, context, user_id, file_data, format_type)
@@ -1690,7 +1530,6 @@ class ArchiveBot:
         file_data = self.github_data.get_file(user_id, file_id)
         
         if not file_data:
-            logger.error(f"❌ File not found for compression: {file_id}")
             query.edit_message_text("❌ File not found")
             return
         
@@ -1715,11 +1554,8 @@ class ArchiveBot:
         files = self.github_data.get_user_files(user_id)
         
         if not files:
-            logger.warning(f"⚠️ No files to compress for user {user_id}")
             query.edit_message_text("❌ No files to compress.")
             return
-        
-        logger.info(f"🗜️ Compressing {len(files)} files to {format_type.upper()} for user {user_id}")
         
         for file_data in files:
             self.compress_and_send(update, context, user_id, file_data, format_type)
@@ -1789,7 +1625,6 @@ class ArchiveBot:
             
         except Exception as e:
             logger.error(f'❌ Bot error: {e}')
-            logger.error(traceback.format_exc())
             raise
 
 
@@ -1804,5 +1639,4 @@ if __name__ == '__main__':
         logger.info('🛑 Bot stopped by user')
     except Exception as e:
         logger.error(f'❌ Fatal error: {e}')
-        logger.error(traceback.format_exc())
         sys.exit(1)
