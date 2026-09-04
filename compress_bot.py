@@ -11,8 +11,10 @@ import shutil
 import zipfile
 import rarfile
 import py7zr
+import pyzipper
 import time
 import base64
+import html as html_lib
 import requests
 import json
 import threading
@@ -27,6 +29,11 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 load_dotenv()
+
+
+def esc(text) -> str:
+    """Escape user-controlled text before it goes into an HTML-parsed Telegram message."""
+    return html_lib.escape(str(text), quote=False)
 
 # ============================================
 # CONFIG
@@ -48,7 +55,9 @@ if not GITHUB_TOKEN or not GITHUB_OWNER or not GITHUB_REPO:
 FORCE_CHANNEL = os.getenv('FORCE_CHANNEL', '@NCK_Dev')
 FORCE_CHANNEL_ID = int(os.getenv('FORCE_CHANNEL_ID', '-1002583286874'))
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+# GitHub's Contents API hard-caps files at 100MB, and base64 encoding inflates
+# the upload payload by ~33%, so we stay well under that ceiling.
+MAX_FILE_SIZE = 70 * 1024 * 1024  # 70MB
 TEMP_DIR = os.getenv('TEMP_DIR', 'temp_downloads')
 PORT = int(os.getenv('PORT', 8080))
 
@@ -184,28 +193,43 @@ class GitHubDataManager:
             return False
 
     def download_file_from_github(self, user_id: int, file_name: str, save_path: str) -> tuple:
-        """Download a file from GitHub using the API with token"""
+        """Download a file from GitHub using the API with token.
+
+        Files under 1MB come back as base64 JSON; the Contents API only
+        returns raw bytes for files between 1-100MB if we explicitly ask
+        for the .raw media type, so we always ask for raw and handle both
+        JSON and raw-bytes responses.
+        """
         try:
             encoded_name = urllib.parse.quote(file_name)
             path = f"user_files/{user_id}/{encoded_name}"
             url = f"{self.base_url}/{path}"
-            
+
+            raw_headers = dict(self.headers)
+            raw_headers["Accept"] = "application/vnd.github.raw"
+
             logger.info(f"📥 Downloading: {url}")
-            response = requests.get(url, headers=self.headers)
-            
+            response = requests.get(url, headers=raw_headers)
+
             logger.info(f"📥 Status: {response.status_code}")
-            
+
             if response.status_code == 200:
-                content = response.json()
-                if content.get('content'):
-                    # GitHub returns base64 encoded content
-                    decoded = base64.b64decode(content['content'])
-                    with open(save_path, 'wb') as f:
-                        f.write(decoded)
-                    logger.info(f"✅ Downloaded: {file_name} ({len(decoded)} bytes)")
-                    return True, "Success"
+                content_type = response.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    # Small file: GitHub still wrapped it in JSON with base64 content
+                    content = response.json()
+                    if content.get('content'):
+                        decoded = base64.b64decode(content['content'])
+                    else:
+                        return False, "No content in response"
                 else:
-                    return False, "No content in response"
+                    # Raw bytes, for files between 1MB and 100MB
+                    decoded = response.content
+
+                with open(save_path, 'wb') as f:
+                    f.write(decoded)
+                logger.info(f"✅ Downloaded: {file_name} ({len(decoded)} bytes)")
+                return True, "Success"
             elif response.status_code == 401:
                 return False, "Invalid GitHub token - please regenerate your token"
             elif response.status_code == 403:
@@ -220,7 +244,12 @@ class GitHubDataManager:
             return False, str(e)
 
     def upload_file_to_github(self, file_path: str, file_name: str, user_id: int, message: str = "") -> tuple:
-        """Upload a file to GitHub using the API with token"""
+        """Upload a file to GitHub using the API with token.
+
+        The Contents API's create/update endpoint supports base64 bodies up
+        to 100MB, so this works as-is as long as MAX_FILE_SIZE stays under
+        that ceiling (accounting for base64 overhead).
+        """
         try:
             with open(file_path, 'rb') as f:
                 content = f.read()
@@ -542,8 +571,8 @@ class ArchiveBot:
         ]
         
         update.message.reply_text(
-            f"🌟 <b>Welcome {user.first_name}!</b>\n\n"
-            f"📤 Upload files directly to GitHub (up to 2GB)\n"
+            f"🌟 <b>Welcome {esc(user.first_name)}!</b>\n\n"
+            f"📤 Upload files directly to GitHub (up to {self.format_size(MAX_FILE_SIZE)})\n"
             f"📁 Files are stored securely\n"
             f"⚙️ Customize settings from the menu\n\n"
             f"Choose an option:",
@@ -574,7 +603,7 @@ class ArchiveBot:
         
         settings_text = (
             f"⚙️ <b>Settings</b>\n\n"
-            f"📝 <b>File Prefix:</b> {prefix if prefix else 'None'}\n"
+            f"📝 <b>File Prefix:</b> {esc(prefix) if prefix else 'None'}\n"
             f"🔑 <b>Archive Password:</b> {'✅ Set' if password else '❌ Not set'}\n"
             f"🖼️ <b>Thumbnail:</b> {'✅ Set' if thumb else '❌ Not set'}\n\n"
             f"<i>Configure your file settings below:</i>"
@@ -789,7 +818,7 @@ class ArchiveBot:
                     overall = ((i + (progress / 100)) / total_files) * 100
                     try:
                         query.edit_message_text(
-                            f"📥 Downloading...\n{file_name}\n\n{ProgressBar.circular(overall)}",
+                            f"📥 Downloading...\n{esc(file_name)}\n\n{ProgressBar.circular(overall)}",
                             parse_mode=ParseMode.HTML
                         )
                     except:
@@ -848,7 +877,7 @@ class ArchiveBot:
             btns = []
             
             for f in files[:5]:
-                text += f"📄 {f['name']}\n"
+                text += f"📄 {esc(f['name'])}\n"
                 text += f"📦 {self.format_size(f['size'])}\n\n"
                 btns.append([
                     InlineKeyboardButton(f"📦 Extract", callback_data=f"extract_{f['id']}"),
@@ -965,7 +994,7 @@ class ArchiveBot:
         ]
         
         query.edit_message_text(
-            f"🌟 <b>Welcome {name}!</b>\n\nChoose an option:",
+            f"🌟 <b>Welcome {esc(name)}!</b>\n\nChoose an option:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
@@ -1033,7 +1062,7 @@ class ArchiveBot:
         
         file_list = ""
         for _, name, size in session['files']:
-            file_list += f"• {name} ({self.format_size(size)})\n"
+            file_list += f"• {esc(name)} ({self.format_size(size)})\n"
         
         kb = [
             [InlineKeyboardButton("✅ Done", callback_data="done_upload")],
@@ -1070,7 +1099,7 @@ class ArchiveBot:
             self.github_data.update_user(user_id, 'file_prefix', text)
             self.clear_session(user_id)
             update.message.reply_text(
-                f"✅ Prefix: <b>{text}</b>",
+                f"✅ Prefix: <b>{esc(text)}</b>",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
@@ -1104,9 +1133,10 @@ class ArchiveBot:
             
             new_name = text
             old_name = file_data['name']
-            
+            old_disp, new_disp = esc(old_name), esc(new_name)
+
             msg = update.message.reply_text(
-                f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(0)}",
+                f"✏️ Renaming...\n\n{old_disp} → {new_disp}\n{ProgressBar.circular(0)}",
                 parse_mode=ParseMode.HTML
             )
             
@@ -1121,13 +1151,13 @@ class ArchiveBot:
                     return
                 
                 msg.edit_text(
-                    f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(30)}",
+                    f"✏️ Renaming...\n\n{old_disp} → {new_disp}\n{ProgressBar.circular(30)}",
                     parse_mode=ParseMode.HTML
                 )
                 
                 # Upload with new name
                 msg.edit_text(
-                    f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(60)}",
+                    f"✏️ Renaming...\n\n{old_disp} → {new_disp}\n{ProgressBar.circular(60)}",
                     parse_mode=ParseMode.HTML
                 )
                 
@@ -1154,7 +1184,7 @@ class ArchiveBot:
                 
                 # Send renamed file
                 msg.edit_text(
-                    f"✏️ Renaming...\n\n{old_name} → {new_name}\n{ProgressBar.circular(90)}",
+                    f"✏️ Renaming...\n\n{old_disp} → {new_disp}\n{ProgressBar.circular(90)}",
                     parse_mode=ParseMode.HTML
                 )
                 
@@ -1183,7 +1213,7 @@ class ArchiveBot:
                             break
                     
                     msg.edit_text(
-                        f"✅ Done!\n\n{old_name} → {new_name}\n{ProgressBar.circular(100)}",
+                        f"✅ Done!\n\n{old_disp} → {new_disp}\n{ProgressBar.circular(100)}",
                         parse_mode=ParseMode.HTML
                     )
                 else:
@@ -1259,7 +1289,8 @@ class ArchiveBot:
             password = self.github_data.get_user_field(user_id, 'archive_password') or None
             
             if ext == '.zip':
-                with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                # pyzipper transparently reads both plain and AES-encrypted zips
+                with pyzipper.AESZipFile(temp_path, 'r') as zip_ref:
                     if password:
                         zip_ref.setpassword(password.encode())
                     total = len(zip_ref.namelist())
@@ -1374,11 +1405,20 @@ class ArchiveBot:
         
         try:
             if format_type == 'zip':
-                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    if password:
+                if password:
+                    # Stdlib zipfile can only READ encrypted zips, not write them.
+                    # pyzipper adds real AES-256 encryption for writing.
+                    with pyzipper.AESZipFile(
+                        archive_path, 'w',
+                        compression=pyzipper.ZIP_DEFLATED,
+                        encryption=pyzipper.WZ_AES
+                    ) as zipf:
                         zipf.setpassword(password.encode())
-                    zipf.write(temp_path, os.path.basename(file_name))
-                    
+                        zipf.write(temp_path, os.path.basename(file_name))
+                else:
+                    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        zipf.write(temp_path, os.path.basename(file_name))
+
             elif format_type == '7z':
                 with py7zr.SevenZipFile(archive_path, 'w', password=password) as szf:
                     szf.write(temp_path, os.path.basename(file_name))
@@ -1430,7 +1470,7 @@ class ArchiveBot:
         ]
         
         query.edit_message_text(
-            f"🗜️ <b>Compress: {file_data['name']}</b>\n\nChoose format:",
+            f"🗜️ <b>Compress: {esc(file_data['name'])}</b>\n\nChoose format:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.HTML
         )
