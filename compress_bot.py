@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - GITHUB API APPROACH
-# Downloads files using GitHub API (with token)
-# Compresses/Extracts, saves back, sends to user
+# TELEGRAM ARCHIVE BOT - WITH TOKEN TESTING
 # ============================================
 
 import os
@@ -96,6 +94,35 @@ class GitHubDataManager:
             "Accept": "application/vnd.github.v3+json"
         }
         logger.info(f"📁 GitHub: {owner}/{repo}")
+        
+        # Test the token on initialization
+        self.test_token()
+
+    def test_token(self):
+        """Test if the GitHub token has proper permissions"""
+        try:
+            url = f"https://api.github.com/repos/{self.owner}/{self.repo}"
+            response = requests.get(url, headers=self.headers)
+            logger.info(f"🔑 Token test: {response.status_code}")
+            
+            if response.status_code == 200:
+                logger.info("✅ GitHub token is valid and has read access")
+                return True
+            elif response.status_code == 401:
+                logger.error("❌ Invalid GitHub token! Please regenerate your token.")
+                return False
+            elif response.status_code == 403:
+                logger.error("❌ GitHub token lacks permissions! Please add 'repo' permission.")
+                return False
+            elif response.status_code == 404:
+                logger.error(f"❌ Repository {self.owner}/{self.repo} not found!")
+                return False
+            else:
+                logger.error(f"❌ Unexpected response: {response.status_code}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Token test failed: {e}")
+            return False
 
     def _get_file_content(self, path: str) -> Optional[dict]:
         try:
@@ -156,39 +183,43 @@ class GitHubDataManager:
         except:
             return False
 
-    def download_file_from_github(self, user_id: int, file_name: str, save_path: str) -> bool:
+    def download_file_from_github(self, user_id: int, file_name: str, save_path: str) -> tuple:
         """Download a file from GitHub using the API with token"""
         try:
             encoded_name = urllib.parse.quote(file_name)
             path = f"user_files/{user_id}/{encoded_name}"
             url = f"{self.base_url}/{path}"
             
-            logger.info(f"📥 Downloading from GitHub API: {url}")
+            logger.info(f"📥 Downloading: {url}")
             response = requests.get(url, headers=self.headers)
             
-            if response.status_code != 200:
-                logger.error(f"❌ Download failed: {response.status_code}")
-                return False
+            logger.info(f"📥 Status: {response.status_code}")
             
-            content = response.json()
-            if not content.get('content'):
-                logger.error("❌ No content in response")
-                return False
-            
-            # Decode base64 content
-            decoded = base64.b64decode(content['content'])
-            
-            with open(save_path, 'wb') as f:
-                f.write(decoded)
-            
-            logger.info(f"✅ Downloaded: {file_name} ({len(decoded)} bytes)")
-            return True
-            
+            if response.status_code == 200:
+                content = response.json()
+                if content.get('content'):
+                    # GitHub returns base64 encoded content
+                    decoded = base64.b64decode(content['content'])
+                    with open(save_path, 'wb') as f:
+                        f.write(decoded)
+                    logger.info(f"✅ Downloaded: {file_name} ({len(decoded)} bytes)")
+                    return True, "Success"
+                else:
+                    return False, "No content in response"
+            elif response.status_code == 401:
+                return False, "Invalid GitHub token - please regenerate your token"
+            elif response.status_code == 403:
+                return False, "GitHub token lacks permission - please add 'repo' permission"
+            elif response.status_code == 404:
+                return False, f"File not found on GitHub: {file_name}"
+            else:
+                return False, f"GitHub API error: {response.status_code}"
+                
         except Exception as e:
             logger.error(f"Download error: {e}")
-            return False
+            return False, str(e)
 
-    def upload_file_to_github(self, file_path: str, file_name: str, user_id: int, message: str = "") -> bool:
+    def upload_file_to_github(self, file_path: str, file_name: str, user_id: int, message: str = "") -> tuple:
         """Upload a file to GitHub using the API with token"""
         try:
             with open(file_path, 'rb') as f:
@@ -220,14 +251,14 @@ class GitHubDataManager:
             
             if response.status_code in [200, 201]:
                 logger.info(f"✅ Uploaded: {file_name}")
-                return True
+                return True, "Success"
             else:
                 logger.error(f"❌ Upload failed: {response.text}")
-                return False
+                return False, f"Upload failed: {response.status_code}"
                 
         except Exception as e:
             logger.error(f"Upload error: {e}")
-            return False
+            return False, str(e)
 
     def get_user(self, user_id: int) -> Optional[Dict]:
         return self._get_file_content(f"data/users/{user_id}.json")
@@ -771,18 +802,7 @@ class ArchiveBot:
                 if not download_success:
                     continue
                 
-                def upload_progress(progress, message):
-                    overall = ((i + 0.6 + (progress / 100 * 0.4)) / total_files) * 100
-                    try:
-                        query.edit_message_text(
-                            f"📤 Uploading...\n{file_name}\n\n{ProgressBar.circular(overall)}",
-                            parse_mode=ParseMode.HTML
-                        )
-                    except:
-                        pass
-                
-                # Use the GitHub upload function with token
-                success = self.github_data.upload_file_to_github(
+                success, result = self.github_data.upload_file_to_github(
                     temp_path, file_name, user_id, f"Upload {file_name} by user {user_id}"
                 )
                 
@@ -883,6 +903,15 @@ class ArchiveBot:
             self.compress_all_with_format(update, context, user_id, format_type)
             return
         
+        if data.startswith("compress_") and data != "compress_all":
+            file_id = data.replace("compress_", "")
+            self.compress_file(update, context, user_id, file_id)
+            return
+        
+        if data == "compress_all":
+            self.compress_all_files(update, context, user_id)
+            return
+        
         # ---- EXTRACT ----
         if data.startswith("extract_") and data != "extract_all":
             file_id = data.replace("extract_", "")
@@ -891,15 +920,6 @@ class ArchiveBot:
         
         if data == "extract_all":
             self.extract_all_files(update, context, user_id)
-            return
-        
-        if data.startswith("compress_") and data != "compress_all":
-            file_id = data.replace("compress_", "")
-            self.compress_file(update, context, user_id, file_id)
-            return
-        
-        if data == "compress_all":
-            self.compress_all_files(update, context, user_id)
             return
         
         # ---- RENAME ----
@@ -1093,10 +1113,10 @@ class ArchiveBot:
             try:
                 # Download from GitHub using API
                 temp_path = os.path.join(TEMP_DIR, f"{user_id}_{old_name}")
-                download_success = self.github_data.download_file_from_github(user_id, old_name, temp_path)
+                success, result = self.github_data.download_file_from_github(user_id, old_name, temp_path)
                 
-                if not download_success:
-                    msg.edit_text("❌ Could not download file from GitHub")
+                if not success:
+                    msg.edit_text(f"❌ {result}")
                     self.clear_session(user_id)
                     return
                 
@@ -1111,12 +1131,12 @@ class ArchiveBot:
                     parse_mode=ParseMode.HTML
                 )
                 
-                upload_success = self.github_data.upload_file_to_github(
+                success, result = self.github_data.upload_file_to_github(
                     temp_path, new_name, user_id, f"Rename {old_name} to {new_name}"
                 )
                 
-                if not upload_success:
-                    msg.edit_text("❌ Upload failed")
+                if not success:
+                    msg.edit_text(f"❌ {result}")
                     self.clear_session(user_id)
                     os.remove(temp_path)
                     return
@@ -1139,9 +1159,9 @@ class ArchiveBot:
                 )
                 
                 # Download the renamed file and send to user
-                download_success = self.github_data.download_file_from_github(user_id, new_name, temp_path)
+                success, result = self.github_data.download_file_from_github(user_id, new_name, temp_path)
                 
-                if download_success:
+                if success:
                     with open(temp_path, 'rb') as doc:
                         context.bot.send_document(
                             chat_id=update.message.chat_id,
@@ -1167,7 +1187,7 @@ class ArchiveBot:
                         parse_mode=ParseMode.HTML
                     )
                 else:
-                    msg.edit_text("❌ Could not download renamed file")
+                    msg.edit_text(f"❌ {result}")
                     os.remove(temp_path)
                 
             except Exception as e:
@@ -1220,10 +1240,10 @@ class ArchiveBot:
         
         # Download from GitHub using API
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-        download_success = self.github_data.download_file_from_github(user_id, file_name, temp_path)
+        success, result = self.github_data.download_file_from_github(user_id, file_name, temp_path)
         
-        if not download_success:
-            query.edit_message_text(f"❌ Could not download file from GitHub")
+        if not success:
+            query.edit_message_text(f"❌ {result}")
             return
         
         ext = os.path.splitext(file_name)[1].lower()
@@ -1339,10 +1359,10 @@ class ArchiveBot:
         
         # Download from GitHub using API
         temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
-        download_success = self.github_data.download_file_from_github(user_id, file_name, temp_path)
+        success, result = self.github_data.download_file_from_github(user_id, file_name, temp_path)
         
-        if not download_success:
-            query.edit_message_text(f"❌ Could not download file from GitHub")
+        if not success:
+            query.edit_message_text(f"❌ {result}")
             return
         
         # Create archive
