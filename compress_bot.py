@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - PYROGRAM + GITHUB
-# Uses Pyrogram for file downloads (2GB limit)
-# All data stored in GitHub
+# TELEGRAM ARCHIVE BOT - DIRECT CDN DOWNLOAD
+# Uses streaming for large files (2GB)
+# No API ID/Hash required - bot token only
 # ============================================
 
 import os
@@ -17,16 +17,12 @@ import time
 import base64
 import requests
 import json
-import asyncio
 import threading
 from datetime import datetime
 from typing import Optional, Dict, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
-from pyrogram import Client, filters as pyro_filters
-from pyrogram.types import Message as PyroMessage
-from pyrogram.enums import MessageMediaType
 from dotenv import load_dotenv
 from flask import Flask, request
 
@@ -39,9 +35,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
     print('❌ BOT_TOKEN is not set')
     sys.exit(1)
-
-# Pyrogram config - uses bot token only (no API ID/Hash needed for downloading)
-PYROGRAM_SESSION = os.getenv('PYROGRAM_SESSION', 'bot_account')
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_OWNER = os.getenv('GITHUB_OWNER')
@@ -86,68 +79,69 @@ def not_found(e):
 
 
 # ============================================
-# PYROGRAM DOWNLOADER
+# DIRECT CDN DOWNLOADER (No API ID/Hash)
 # ============================================
-class PyrogramDownloader:
-    """Handles file downloads using Pyrogram (2GB limit)"""
+class DirectCDNDownloader:
+    """Downloads files directly from Telegram CDN using streaming.
+       Supports files up to 2GB without API ID/Hash.
+    """
     
-    def __init__(self, bot_token: str, session_name: str = 'bot_account'):
-        self.bot_token = bot_token
-        self.session_name = session_name
-        self.client = None
-        
-    async def start_client(self):
-        """Start the Pyrogram client"""
-        if self.client:
-            return
-        
-        # Use bot token only - no API ID/Hash required for downloads
-        self.client = Client(
-            self.session_name,
-            bot_token=self.bot_token,
-            in_memory=True
-        )
-        await self.client.start()
-        logger.info("✅ Pyrogram client started")
-    
-    async def download_file(self, file_id: str, save_path: str, progress_callback=None) -> bool:
-        """Download file using Pyrogram with progress"""
+    @staticmethod
+    def get_download_url(bot_token: str, file_id: str) -> Optional[str]:
+        """Get the direct CDN download URL for a file."""
         try:
-            await self.start_client()
+            url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
             
-            # Pyrogram can download using file_id directly
-            result = await self.client.download_media(
-                file_id,
-                file_name=save_path,
-                progress=progress_callback
-            )
-            
-            if result:
-                logger.info(f"✅ Downloaded file to: {result}")
-                return True
-            else:
-                logger.error("❌ Download failed")
-                return False
-                
+            if data.get('ok') and data.get('result'):
+                file_path = data['result']['file_path']
+                return f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+            return None
         except Exception as e:
-            logger.error(f"❌ Pyrogram download error: {e}")
-            return False
-    
-    async def stop_client(self):
-        """Stop the Pyrogram client"""
-        if self.client:
-            await self.client.stop()
-            self.client = None
-            logger.info("✅ Pyrogram client stopped")
+            logger.error(f"Error getting download URL: {e}")
+            return None
 
-    def sync_download_file(self, file_id: str, save_path: str, progress_callback=None) -> bool:
-        """Synchronous wrapper for download_file"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    @staticmethod
+    def download_file(bot_token: str, file_id: str, save_path: str, progress_callback=None) -> bool:
+        """Download a file using streaming from the CDN URL."""
         try:
-            return loop.run_until_complete(self.download_file(file_id, save_path, progress_callback))
-        finally:
-            loop.close()
+            download_url = DirectCDNDownloader.get_download_url(bot_token, file_id)
+            if not download_url:
+                return False
+            
+            if progress_callback:
+                progress_callback(10, "Starting download...")
+            
+            # Stream download with chunking
+            response = requests.get(download_url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            last_progress = 0
+            
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=131072):  # 128KB chunks for speed
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback and total_size > 0:
+                            progress = 10 + (downloaded / total_size) * 80
+                            if int(progress) > last_progress + 2:
+                                last_progress = int(progress)
+                                progress_callback(progress, f"Downloading... {int(progress)}%")
+            
+            if progress_callback:
+                progress_callback(90, "Download complete!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return False
 
 
 # ============================================
@@ -330,6 +324,62 @@ class GitHubDataManager:
 
 
 # ============================================
+# FAST GITHUB UPLOADER
+# ============================================
+class FastGitHubUploader:
+    @staticmethod
+    def upload_file(file_path: str, file_name: str, user_id: int, progress_callback=None) -> tuple:
+        try:
+            if progress_callback:
+                progress_callback(10, "Reading file...")
+            
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            
+            encoded = base64.b64encode(content).decode('utf-8')
+            
+            if progress_callback:
+                progress_callback(50, "Uploading to GitHub...")
+            
+            github_path = f"user_files/{user_id}/{file_name}"
+            github_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{github_path}"
+            
+            headers = {
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            sha = None
+            try:
+                check_response = requests.get(github_url, headers=headers)
+                if check_response.status_code == 200:
+                    sha = check_response.json().get('sha')
+            except:
+                pass
+            
+            data = {
+                "message": f"Upload {file_name} by user {user_id}",
+                "content": encoded,
+                "branch": GITHUB_BRANCH
+            }
+            if sha:
+                data["sha"] = sha
+            
+            upload_response = requests.put(github_url, headers=headers, json=data)
+            
+            if upload_response.status_code in [200, 201]:
+                if progress_callback:
+                    progress_callback(100, "Upload complete!")
+                return True, f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
+            else:
+                return False, f"GitHub upload failed: {upload_response.text}"
+                
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
+            return False, str(e)
+
+
+# ============================================
 # PROGRESS BAR
 # ============================================
 class ProgressBar:
@@ -358,7 +408,6 @@ class ProgressBar:
 class ArchiveBot:
     def __init__(self):
         self.github_data = GitHubDataManager(GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH)
-        self.downloader = PyrogramDownloader(BOT_TOKEN)
         self.bot_username = ''
         self.bot_id = 0
         self.session_cache = {}
@@ -708,22 +757,23 @@ class ArchiveBot:
             for i, (file_id, file_name, file_size) in enumerate(files):
                 temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_name}")
                 
-                def download_progress(current, total):
-                    progress = ((i + (current / total * 0.6)) / total_files) * 100
+                def download_progress(progress, message):
+                    overall = ((i + (progress / 100)) / total_files) * 100
                     try:
                         query.edit_message_text(
                             f"📥 <b>Downloading...</b>\n\n"
                             f"📄 {file_name}\n"
-                            f"{ProgressBar.circular(progress)}\n\n"
-                            f"<i>Using Pyrogram (2GB support)</i>",
+                            f"{ProgressBar.circular(overall)}\n\n"
+                            f"<i>{message}</i>",
                             parse_mode=ParseMode.HTML
                         )
                     except:
                         pass
                 
-                # Use Pyrogram to download large files
-                logger.info(f"Downloading file {file_name} (ID: {file_id}) using Pyrogram")
-                download_success = self.downloader.sync_download_file(
+                # Use direct CDN download (no API ID/Hash required)
+                logger.info(f"Downloading file {file_name} (ID: {file_id}) using CDN streaming")
+                download_success = DirectCDNDownloader.download_file(
+                    BOT_TOKEN, 
                     file_id, 
                     temp_path,
                     download_progress
@@ -1534,9 +1584,9 @@ class ArchiveBot:
     # RUN BOT
     # ============================================
     def run(self):
-        logger.info('🚀 Starting Archive Bot with Pyrogram...')
+        logger.info('🚀 Starting Archive Bot with CDN streaming...')
         logger.info(f'📁 Data stored in: {GITHUB_OWNER}/{GITHUB_REPO}')
-        logger.info('📦 Max file size: 2GB (using Pyrogram)')
+        logger.info('📦 Max file size: 2GB (using CDN streaming)')
         logger.info('🔑 No API ID/Hash required - uses bot token only')
         
         try:
@@ -1547,9 +1597,6 @@ class ArchiveBot:
             health_thread = threading.Thread(target=run_health_server, daemon=True)
             health_thread.start()
             logger.info(f'✅ Health check server running on port {PORT}')
-            
-            # Initialize Pyrogram client
-            asyncio.run(self.downloader.start_client())
             
             # Start the bot
             updater = Updater(BOT_TOKEN, use_context=True)
@@ -1580,65 +1627,6 @@ class ArchiveBot:
         except Exception as e:
             logger.error(f'❌ Bot error: {e}')
             raise
-        finally:
-            # Cleanup Pyrogram client
-            asyncio.run(self.downloader.stop_client())
-
-
-# ============================================
-# FAST GITHUB UPLOADER (moved outside class)
-# ============================================
-class FastGitHubUploader:
-    @staticmethod
-    def upload_file(file_path: str, file_name: str, user_id: int, progress_callback=None) -> tuple:
-        try:
-            if progress_callback:
-                progress_callback(10, "Reading file...")
-            
-            with open(file_path, 'rb') as f:
-                content = f.read()
-            
-            encoded = base64.b64encode(content).decode('utf-8')
-            
-            if progress_callback:
-                progress_callback(50, "Uploading to GitHub...")
-            
-            github_path = f"user_files/{user_id}/{file_name}"
-            github_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{github_path}"
-            
-            headers = {
-                "Authorization": f"token {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            
-            sha = None
-            try:
-                check_response = requests.get(github_url, headers=headers)
-                if check_response.status_code == 200:
-                    sha = check_response.json().get('sha')
-            except:
-                pass
-            
-            data = {
-                "message": f"Upload {file_name} by user {user_id}",
-                "content": encoded,
-                "branch": GITHUB_BRANCH
-            }
-            if sha:
-                data["sha"] = sha
-            
-            upload_response = requests.put(github_url, headers=headers, json=data)
-            
-            if upload_response.status_code in [200, 201]:
-                if progress_callback:
-                    progress_callback(100, "Upload complete!")
-                return True, f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
-            else:
-                return False, f"GitHub upload failed: {upload_response.text}"
-                
-        except Exception as e:
-            logger.error(f"Upload error: {e}")
-            return False, str(e)
 
 
 # ============================================
