@@ -18,6 +18,7 @@ import requests
 import json
 import threading
 import traceback
+import urllib.parse
 from datetime import datetime
 from typing import Optional, Dict, List
 
@@ -208,12 +209,15 @@ class GitHubDataManager:
         )
 
     def get_file_raw_url(self, user_id: int, file_name: str) -> str:
-        """Get the raw URL for a file"""
-        return f"{self.raw_base_url}/user_files/{user_id}/{file_name}"
+        """Get the raw URL for a file with proper URL encoding"""
+        # URL encode the filename for the URL path
+        encoded_name = urllib.parse.quote(file_name)
+        return f"{self.raw_base_url}/user_files/{user_id}/{encoded_name}"
 
     def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str):
-        """Add file to user's file list without github_path (we construct it later)"""
+        """Add file to user's file list"""
         user_files = self.get_user_files(user_id)
+        
         file_data = {
             "id": file_id,
             "user_id": user_id,
@@ -234,7 +238,10 @@ class GitHubDataManager:
     def get_user_files(self, user_id: int) -> List[Dict]:
         data = self._get_file_content(f"data/files/{user_id}.json")
         if data and data.get('files'):
-            return [f for f in data['files'] if f.get('is_active', 1) == 1]
+            active_files = [f for f in data['files'] if f.get('is_active', 1) == 1]
+            logger.info(f"📋 Found {len(active_files)} active files for user {user_id}")
+            return active_files
+        logger.info(f"📋 No files found for user {user_id}")
         return []
 
     def get_file(self, user_id: int, file_id: str) -> Optional[Dict]:
@@ -260,8 +267,21 @@ class GitHubDataManager:
         return False
 
     def delete_file_from_github(self, user_id: int, file_name: str) -> bool:
-        path = f"user_files/{user_id}/{file_name}"
+        encoded_name = urllib.parse.quote(file_name)
+        path = f"user_files/{user_id}/{encoded_name}"
         return self._delete_file(path, f"Delete {file_name} by user {user_id}")
+
+    def check_file_exists_on_github(self, user_id: int, file_name: str) -> bool:
+        """Check if a file exists on GitHub"""
+        encoded_name = urllib.parse.quote(file_name)
+        path = f"user_files/{user_id}/{encoded_name}"
+        url = f"{self.base_url}/{path}"
+        try:
+            response = requests.get(url, headers=self.headers)
+            logger.info(f"🔍 Checking file existence: {url} -> {response.status_code}")
+            return response.status_code == 200
+        except:
+            return False
 
 
 # ============================================
@@ -341,7 +361,9 @@ class FastGitHubUploader:
             if progress_callback:
                 progress_callback(50, "Uploading to GitHub...")
             
-            github_path = f"user_files/{user_id}/{file_name}"
+            # URL encode the filename for GitHub API
+            encoded_name = urllib.parse.quote(file_name)
+            github_path = f"user_files/{user_id}/{encoded_name}"
             github_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{github_path}"
             
             headers = {
@@ -354,6 +376,7 @@ class FastGitHubUploader:
                 check_response = requests.get(github_url, headers=headers)
                 if check_response.status_code == 200:
                     sha = check_response.json().get('sha')
+                    logger.info(f"📤 File already exists on GitHub, updating...")
             except:
                 pass
             
@@ -802,10 +825,14 @@ class ArchiveBot:
                     unique_id = secrets.token_hex(16)
                     self.github_data.add_file(unique_id, user_id, file_name, file_size, file_id)
                     uploaded_count += 1
-                    logger.info(f"✅ Uploaded: {file_name} (path: {github_path})")
+                    logger.info(f"✅ Uploaded: {file_name}")
+                    
+                    # Verify the file exists on GitHub
+                    exists = self.github_data.check_file_exists_on_github(user_id, file_name)
+                    logger.info(f"🔍 File exists on GitHub: {exists}")
                 else:
-                    logger.error(f"❌ Failed to upload {file_name}: {github_path}")
-                    query.edit_message_text(f"❌ Failed to upload {file_name}: {github_path}")
+                    logger.error(f"❌ Failed to upload {file_name}")
+                    query.edit_message_text(f"❌ Failed to upload {file_name}")
                 
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -1130,14 +1157,14 @@ class ArchiveBot:
             )
             
             try:
-                # Download from GitHub using raw URL
+                # Download from GitHub using raw URL with encoding
                 raw_url = self.github_data.get_file_raw_url(user_id, old_name)
                 logger.info(f"📥 Downloading from GitHub: {raw_url}")
                 response = requests.get(raw_url)
                 
                 if response.status_code != 200:
                     logger.error(f"❌ Could not download file from GitHub: {response.status_code}")
-                    msg.edit_text("❌ Could not download file from GitHub")
+                    msg.edit_text(f"❌ Could not download file from GitHub (Status: {response.status_code})")
                     self.clear_session(user_id)
                     return
                 
@@ -1159,7 +1186,8 @@ class ArchiveBot:
                 )
                 
                 encoded = base64.b64encode(content).decode('utf-8')
-                new_path = f"user_files/{user_id}/{new_name}"
+                encoded_new_name = urllib.parse.quote(new_name)
+                new_path = f"user_files/{user_id}/{encoded_new_name}"
                 new_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{new_path}"
                 headers = {
                     "Authorization": f"token {GITHUB_TOKEN}",
@@ -1305,7 +1333,7 @@ class ArchiveBot:
         
         query.edit_message_text(f"📦 Extracting {file_name}...\n\n{ProgressBar.circular(0)}")
         
-        # Download from GitHub using raw URL
+        # Download from GitHub using raw URL with encoding
         raw_url = self.github_data.get_file_raw_url(user_id, file_name)
         logger.info(f"📥 Downloading from GitHub: {raw_url}")
         
@@ -1450,7 +1478,7 @@ class ArchiveBot:
         
         query.edit_message_text(f"🗜️ Compressing {file_name} to {format_type.upper()}...\n\n{ProgressBar.circular(0)}")
         
-        # Download from GitHub using raw URL
+        # Download from GitHub using raw URL with encoding
         raw_url = self.github_data.get_file_raw_url(user_id, file_name)
         logger.info(f"📥 Downloading from GitHub: {raw_url}")
         
