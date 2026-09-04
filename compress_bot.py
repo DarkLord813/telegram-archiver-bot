@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - FULLY FIXED
+# TELEGRAM ARCHIVE BOT - FULLY FIXED V2
 # Compatible with Render.com Web Service
 # ============================================
 
@@ -610,7 +610,7 @@ class ArchiveBot:
         )
 
     # ============================================
-    # CALLBACK HANDLER - FIXED
+    # CALLBACK HANDLER - FIXED WITH PROPER ORDERING
     # ============================================
     def callback_handler(self, update: Update, context: CallbackContext):
         query = update.callback_query
@@ -879,6 +879,23 @@ class ArchiveBot:
             )
             return
         
+        # ---- COMPRESS SINGLE WITH FORMAT - MUST CHECK FIRST
+        if data.startswith("compress_single_zip_"):
+            file_id = data.replace("compress_single_zip_", "")
+            self.compress_single_with_format(update, context, user_id, file_id, "zip")
+            return
+        
+        if data.startswith("compress_single_7z_"):
+            file_id = data.replace("compress_single_7z_", "")
+            self.compress_single_with_format(update, context, user_id, file_id, "7z")
+            return
+        
+        # ---- COMPRESS ALL WITH FORMAT ----
+        if data.startswith("compress_all_"):
+            format_type = data.replace("compress_all_", "")
+            self.compress_all_with_format(update, context, user_id, format_type)
+            return
+        
         # ---- EXTRACT SINGLE FILE ----
         if data.startswith("extract_") and data != "extract_all":
             file_id = data.replace("extract_", "")
@@ -899,24 +916,6 @@ class ArchiveBot:
         # ---- COMPRESS ALL FILES ----
         if data == "compress_all":
             self.compress_all_files(update, context, user_id)
-            return
-        
-        # ---- COMPRESS SINGLE WITH FORMAT ----
-        if data.startswith("compress_single_zip_"):
-            # Extract the actual file ID from the callback
-            file_id = data.replace("compress_single_zip_", "")
-            self.compress_single_with_format(update, context, user_id, file_id, "zip")
-            return
-        
-        if data.startswith("compress_single_7z_"):
-            file_id = data.replace("compress_single_7z_", "")
-            self.compress_single_with_format(update, context, user_id, file_id, "7z")
-            return
-        
-        # ---- COMPRESS ALL WITH FORMAT ----
-        if data.startswith("compress_all_"):
-            format_type = data.replace("compress_all_", "")
-            self.compress_all_with_format(update, context, user_id, format_type)
             return
         
         # ---- RENAME FILE ----
