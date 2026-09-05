@@ -1550,7 +1550,7 @@ class ArchiveBot:
                                 chat_id=query.message.chat_id,
                                 document=doc,
                                 filename=file_name_out,
-                                thumbnail=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
+                                thumb=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
                             )
             
             shutil.rmtree(extract_dir, ignore_errors=True)
@@ -1638,7 +1638,7 @@ class ArchiveBot:
                     chat_id=query.message.chat_id,
                     document=doc,
                     filename=archive_name,
-                    thumbnail=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
+                    thumb=open(thumb, 'rb') if thumb and os.path.exists(thumb) else None
                 )
             
             query.edit_message_text(f"✅ Compression complete!\n\n{ProgressBar.circular(100)}")
