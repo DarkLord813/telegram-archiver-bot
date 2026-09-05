@@ -11,6 +11,7 @@ import shutil
 import zipfile
 import rarfile
 import py7zr
+import pyzipper
 import time
 import base64
 import requests
@@ -58,8 +59,9 @@ if not GITHUB_TOKEN or not GITHUB_OWNER or not GITHUB_REPO:
 FORCE_CHANNEL = os.getenv('FORCE_CHANNEL', '@NCK_Dev')
 FORCE_CHANNEL_ID = int(os.getenv('FORCE_CHANNEL_ID', '-1002583286874'))
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-GITHUB_API_LIMIT = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = 70 * 1024 * 1024  # 70MB — GitHub's Contents API hard-caps at 100MB,
+                                    # and base64 encoding inflates the upload ~33%.
+GITHUB_API_LIMIT = 100 * 1024 * 1024  # 100MB (GitHub's actual ceiling, kept for reference)
 TEMP_DIR = os.getenv('TEMP_DIR', 'temp_downloads')
 PORT = int(os.getenv('PORT', 8080))
 
@@ -222,32 +224,44 @@ class GitHubDataManager:
     def download_file_content(self, user_id: int, file_name: str) -> Optional[bytes]:
         """Download file content from GitHub"""
         try:
-            # Try raw URL first (faster)
             encoded_name = urllib.parse.quote(file_name)
+
+            # Raw CDN first (faster) — needs the auth header too, since the
+            # repo is private and raw.githubusercontent.com 404s without one.
             raw_url = f"{self.raw_base_url}/user_files/{user_id}/{encoded_name}"
             logger.info(f"📥 Downloading from: {raw_url}")
-            
-            response = requests.get(raw_url)
+
+            response = requests.get(raw_url, headers={"Authorization": f"token {self.token}"})
             if response.status_code == 200:
                 logger.info(f"✅ Downloaded: {file_name} ({len(response.content)} bytes)")
                 return response.content
-            
-            # If raw fails, try API
+
+            # Fall back to the Contents API. Files over 1MB only come back
+            # as raw bytes if we explicitly request the .raw media type —
+            # otherwise the 'content' field is empty for anything >1MB.
             path = f"user_files/{user_id}/{encoded_name}"
             url = f"{self.base_url}/{path}"
             logger.info(f"📥 Trying API: {url}")
-            
-            response = requests.get(url, headers=self.headers, params={"ref": self.branch})
+
+            api_headers = dict(self.headers)
+            api_headers["Accept"] = "application/vnd.github.raw"
+            response = requests.get(url, headers=api_headers, params={"ref": self.branch})
+
             if response.status_code == 200:
-                content_b64 = response.json().get("content", "")
-                if content_b64:
-                    content = base64.b64decode(content_b64)
-                    logger.info(f"✅ Downloaded via API: {file_name} ({len(content)} bytes)")
-                    return content
-            
-            logger.error(f"❌ Could not download file: {file_name}")
+                content_type = response.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    content_b64 = response.json().get("content", "")
+                    if content_b64:
+                        content = base64.b64decode(content_b64)
+                        logger.info(f"✅ Downloaded via API: {file_name} ({len(content)} bytes)")
+                        return content
+                else:
+                    logger.info(f"✅ Downloaded via API (raw): {file_name} ({len(response.content)} bytes)")
+                    return response.content
+
+            logger.error(f"❌ Could not download file: {file_name} (raw={response.status_code})")
             return None
-            
+
         except Exception as e:
             logger.error(f"Download error: {e}")
             return None
@@ -453,16 +467,29 @@ def resolve_mediafire_url(share_url: str) -> str:
     raise ValueError("Couldn't find a download link on that Mediafire page.")
 
 
-def download_from_mediafire(share_url: str, dest_dir: str) -> str:
+def download_from_mediafire(share_url: str, dest_dir: str, max_size: int = None) -> str:
     direct_url = resolve_mediafire_url(share_url)
     filename = direct_url.split("/")[-1].split("?")[0]
     dest_path = os.path.join(dest_dir, filename)
 
     with requests.get(direct_url, headers=LINK_HEADERS, stream=True, timeout=(15, 120)) as r:
         r.raise_for_status()
+        if max_size:
+            content_length = r.headers.get("Content-Length")
+            if content_length and int(content_length) > max_size:
+                raise ValueError(
+                    f"File is {int(content_length) / (1024*1024):.1f}MB, "
+                    f"over the {max_size / (1024*1024):.0f}MB limit."
+                )
+        downloaded = 0
         with open(dest_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 f.write(chunk)
+                downloaded += len(chunk)
+                if max_size and downloaded > max_size:
+                    f.close()
+                    os.remove(dest_path)
+                    raise ValueError(f"File exceeds the {max_size / (1024*1024):.0f}MB limit.")
 
     return dest_path
 
@@ -1164,7 +1191,7 @@ class ArchiveBot:
                         "⏳ This may take a moment.",
                         parse_mode=ParseMode.HTML
                     )
-                    local_path = download_from_mediafire(mediafire_match.group(1), local_dir)
+                    local_path = download_from_mediafire(mediafire_match.group(1), local_dir, max_size=MAX_FILE_SIZE)
                 else:
                     msg.edit_text(
                         "🔗 <b>Google Drive Link Detected</b>\n\n"
@@ -1181,6 +1208,14 @@ class ArchiveBot:
 
             file_name = os.path.basename(local_path)
             file_size = os.path.getsize(local_path)
+
+            if file_size > MAX_FILE_SIZE:
+                msg.edit_text(
+                    f"❌ That file is {self.format_size(file_size)}, which is over the "
+                    f"{self.format_size(MAX_FILE_SIZE)} limit GitHub storage can handle."
+                )
+                shutil.rmtree(local_dir, ignore_errors=True)
+                return
 
             msg.edit_text(
                 f"📤 <b>Uploading to GitHub...</b>\n\n"
@@ -1449,7 +1484,9 @@ class ArchiveBot:
             password = self.github_data.get_user_field(user_id, 'archive_password') or None
             
             if ext == '.zip':
-                with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                # pyzipper reads both plain and AES-encrypted zips; stdlib
+                # zipfile can't open the AES ones we now create for passwords.
+                with pyzipper.AESZipFile(temp_path, 'r') as zip_ref:
                     if password:
                         zip_ref.setpassword(password.encode())
                     total = len(zip_ref.namelist())
@@ -1576,17 +1613,13 @@ class ArchiveBot:
         try:
             if format_type == 'zip':
                 if password:
-                    try:
-                        import pyzipper
-                        with pyzipper.AESZipFile(archive_path, 'w', compression=pyzipper.ZIP_LZMA, encryption=pyzipper.WZ_AES) as zipf:
-                            zipf.setpassword(password.encode())
-                            zipf.write(temp_path, os.path.basename(file_name))
-                    except:
-                        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                            if password:
-                                # Note: stdlib zipfile doesn't support encryption
-                                pass
-                            zipf.write(temp_path, os.path.basename(file_name))
+                    with pyzipper.AESZipFile(
+                        archive_path, 'w',
+                        compression=pyzipper.ZIP_LZMA,
+                        encryption=pyzipper.WZ_AES
+                    ) as zipf:
+                        zipf.setpassword(password.encode())
+                        zipf.write(temp_path, os.path.basename(file_name))
                 else:
                     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         zipf.write(temp_path, os.path.basename(file_name))
