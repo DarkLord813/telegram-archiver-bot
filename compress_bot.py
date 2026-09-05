@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# TELEGRAM ARCHIVE BOT - FULLY INTEGRATED
-# Features: Upload, Extract, Compress, Rename, Delete
-# Link Support: Mediafire, Google Drive
-# 2GB File Support via GitHub Releases API
+# TELEGRAM ARCHIVE BOT - FULLY FIXED
 # ============================================
 
 import os
@@ -22,6 +19,7 @@ import threading
 import traceback
 import urllib.parse
 import re
+import html
 from datetime import datetime
 from typing import Optional, Dict, List
 from bs4 import BeautifulSoup
@@ -37,8 +35,6 @@ load_dotenv()
 # ESCAPE FUNCTION
 # ============================================
 def esc(text) -> str:
-    """Escape user-controlled text for HTML"""
-    import html
     return html.escape(str(text), quote=False)
 
 
@@ -62,84 +58,18 @@ if not GITHUB_TOKEN or not GITHUB_OWNER or not GITHUB_REPO:
 FORCE_CHANNEL = os.getenv('FORCE_CHANNEL', '@NCK_Dev')
 FORCE_CHANNEL_ID = int(os.getenv('FORCE_CHANNEL_ID', '-1002583286874'))
 
-# Max file size: 2GB
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-GITHUB_API_LIMIT = 100 * 1024 * 1024  # 100MB (GitHub Contents API limit)
+GITHUB_API_LIMIT = 100 * 1024 * 1024  # 100MB
 TEMP_DIR = os.getenv('TEMP_DIR', 'temp_downloads')
 PORT = int(os.getenv('PORT', 8080))
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# ============================================
-# LINK DOWNLOAD SUPPORT (Mediafire / Google Drive)
-# ============================================
-MEDIAFIRE_RE = re.compile(r"(https?://(www\.)?mediafire\.com/\S+)")
-GDRIVE_RE = re.compile(r"(https?://(drive|docs)\.google\.com/\S+)")
-LINK_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-
-def resolve_mediafire_url(share_url: str) -> str:
-    """Scrapes the real download link off a Mediafire share page."""
-    resp = requests.get(share_url, headers=LINK_HEADERS, timeout=30)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    btn = soup.find(id="downloadButton")
-    if btn and btn.get("href"):
-        return btn["href"]
-
-    match = re.search(r'href="(https://download\d+\.mediafire\.com/[^"]+)"', resp.text)
-    if match:
-        return match.group(1)
-
-    raise ValueError("Couldn't find a download link on that Mediafire page.")
-
-
-def download_from_mediafire(share_url: str, dest_dir: str) -> str:
-    """Downloads a Mediafire-shared file to dest_dir, returns the local file path."""
-    direct_url = resolve_mediafire_url(share_url)
-    filename = direct_url.split("/")[-1].split("?")[0]
-    dest_path = os.path.join(dest_dir, filename)
-
-    with requests.get(direct_url, headers=LINK_HEADERS, stream=True, timeout=(15, 120)) as r:
-        r.raise_for_status()
-        content_length = r.headers.get("Content-Length")
-        if content_length and int(content_length) > MAX_FILE_SIZE:
-            raise ValueError(f"File is {int(content_length) / 1024 / 1024:.1f}MB — too big to handle.")
-
-        with open(dest_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
-
-    return dest_path
-
-
-def download_from_gdrive(share_url: str, dest_dir: str) -> str:
-    """Downloads a publicly-shared Google Drive file to dest_dir, returns the local file path."""
-    import gdown
-    patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"[?&]id=([a-zA-Z0-9_-]+)", r"/d/([a-zA-Z0-9_-]+)"]
-    file_id = None
-    for p in patterns:
-        m = re.search(p, share_url)
-        if m:
-            file_id = m.group(1)
-            break
-    if not file_id:
-        raise ValueError("Couldn't extract a file ID from that Google Drive link.")
-
-    os.makedirs(dest_dir, exist_ok=True)
-    output = gdown.download(id=file_id, output=dest_dir + "/", quiet=False)
-    if not output:
-        raise ValueError("Google Drive download failed — file may be private or restricted.")
-    return output
-
 
 # ============================================
 # FLASK HEALTH CHECK APP
@@ -162,124 +92,6 @@ def not_found(e):
 
 
 # ============================================
-# GITHUB LARGE FILE MANAGER (Releases API)
-# ============================================
-class GitHubLargeFileManager:
-    def __init__(self, token: str, owner: str, repo: str):
-        self.token = token
-        self.owner = owner
-        self.repo = repo
-        self.headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        self.releases_url = f"https://api.github.com/repos/{owner}/{repo}/releases"
-        
-    def get_or_create_release(self, user_id: int) -> tuple:
-        try:
-            response = requests.get(self.releases_url, headers=self.headers)
-            if response.status_code == 200:
-                releases = response.json()
-                for release in releases:
-                    if release.get('tag_name') == f"user-{user_id}-files":
-                        return True, release['id']
-            
-            data = {
-                "tag_name": f"user-{user_id}-files",
-                "name": f"User {user_id} Files",
-                "body": f"Large files for user {user_id}",
-                "draft": False,
-                "prerelease": False
-            }
-            response = requests.post(self.releases_url, headers=self.headers, json=data)
-            if response.status_code == 201:
-                release = response.json()
-                return True, release['id']
-            else:
-                return False, None
-        except Exception as e:
-            logger.error(f"Error creating release: {e}")
-            return False, None
-
-    def upload_large_file(self, file_path: str, file_name: str, user_id: int) -> tuple:
-        try:
-            success, release_id = self.get_or_create_release(user_id)
-            if not success:
-                return False, "Could not create release"
-            
-            upload_url = f"https://uploads.github.com/repos/{self.owner}/{self.repo}/releases/{release_id}/assets"
-            params = {"name": file_name}
-            
-            with open(file_path, 'rb') as f:
-                files = {'file': (file_name, f, 'application/octet-stream')}
-                response = requests.post(
-                    upload_url,
-                    headers=self.headers,
-                    params=params,
-                    files=files
-                )
-            
-            if response.status_code in [201, 200]:
-                asset = response.json()
-                download_url = asset.get('browser_download_url')
-                logger.info(f"✅ Uploaded large file: {file_name}")
-                return True, download_url
-            else:
-                return False, f"Upload failed: {response.status_code}"
-                
-        except Exception as e:
-            logger.error(f"Upload error: {e}")
-            return False, str(e)
-
-    def download_large_file(self, file_name: str, user_id: int, save_path: str) -> tuple:
-        try:
-            response = requests.get(self.releases_url, headers=self.headers)
-            if response.status_code != 200:
-                return False, "Could not get releases"
-            
-            releases = response.json()
-            for release in releases:
-                if release.get('tag_name') == f"user-{user_id}-files":
-                    assets = release.get('assets', [])
-                    for asset in assets:
-                        if asset.get('name') == file_name:
-                            download_url = asset.get('browser_download_url')
-                            if download_url:
-                                response = requests.get(download_url, stream=True)
-                                with open(save_path, 'wb') as f:
-                                    for chunk in response.iter_content(chunk_size=131072):
-                                        if chunk:
-                                            f.write(chunk)
-                                return True, "Success"
-            
-            return False, "File not found in releases"
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return False, str(e)
-
-    def delete_large_file(self, file_name: str, user_id: int) -> bool:
-        try:
-            response = requests.get(self.releases_url, headers=self.headers)
-            if response.status_code != 200:
-                return False
-            
-            releases = response.json()
-            for release in releases:
-                if release.get('tag_name') == f"user-{user_id}-files":
-                    assets = release.get('assets', [])
-                    for asset in assets:
-                        if asset.get('name') == file_name:
-                            delete_url = asset.get('url')
-                            response = requests.delete(delete_url, headers=self.headers)
-                            if response.status_code in [200, 204]:
-                                logger.info(f"🗑️ Deleted large file: {file_name}")
-                                return True
-            return False
-        except:
-            return False
-
-
-# ============================================
 # GITHUB DATA MANAGER
 # ============================================
 class GitHubDataManager:
@@ -293,17 +105,8 @@ class GitHubDataManager:
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json"
         }
-        self.large_file_manager = GitHubLargeFileManager(token, owner, repo)
+        self.raw_base_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}"
         logger.info(f"📁 GitHub: {owner}/{repo}")
-
-    def test_token(self):
-        try:
-            url = f"https://api.github.com/repos/{self.owner}/{self.repo}"
-            response = requests.get(url, headers=self.headers)
-            logger.info(f"🔑 Token test: {response.status_code}")
-            return response.status_code == 200
-        except:
-            return False
 
     def _get_file_content(self, path: str) -> Optional[dict]:
         try:
@@ -364,84 +167,6 @@ class GitHubDataManager:
         except:
             return False
 
-    def download_file_content(self, user_id: int, file_name: str) -> Optional[bytes]:
-        """Download file content via GitHub API (always up to date)"""
-        try:
-            encoded_name = urllib.parse.quote(file_name)
-            path = f"user_files/{user_id}/{encoded_name}"
-            url = f"{self.base_url}/{path}"
-            
-            # First try Contents API
-            response = requests.get(url, headers=self.headers, params={"ref": self.branch})
-            if response.status_code == 200:
-                content_b64 = response.json().get("content", "")
-                if content_b64:
-                    return base64.b64decode(content_b64)
-            
-            # If not found, try Releases API
-            temp_path = os.path.join(TEMP_DIR, f"temp_{user_id}_{file_name}")
-            success, result = self.large_file_manager.download_large_file(file_name, user_id, temp_path)
-            if success:
-                with open(temp_path, 'rb') as f:
-                    content = f.read()
-                os.remove(temp_path)
-                return content
-            
-            return None
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return None
-
-    def upload_file_content(self, file_path: str, file_name: str, user_id: int, file_size: int) -> tuple:
-        """Upload file - uses Releases API for large files"""
-        # If file is large (>100MB), use Releases API
-        if file_size > GITHUB_API_LIMIT:
-            return self.large_file_manager.upload_large_file(file_path, file_name, user_id)
-        
-        # Small file: use Contents API
-        with open(file_path, 'rb') as f:
-            content = f.read()
-        
-        encoded = base64.b64encode(content).decode('utf-8')
-        encoded_name = urllib.parse.quote(file_name)
-        path = f"user_files/{user_id}/{encoded_name}"
-        url = f"{self.base_url}/{path}"
-        
-        sha = None
-        try:
-            check_response = requests.get(url, headers=self.headers)
-            if check_response.status_code == 200:
-                sha = check_response.json().get('sha')
-        except:
-            pass
-        
-        data = {
-            "message": f"Upload {file_name} by user {user_id}",
-            "content": encoded,
-            "branch": self.branch
-        }
-        if sha:
-            data["sha"] = sha
-        
-        response = requests.put(url, headers=self.headers, json=data)
-        
-        if response.status_code in [200, 201]:
-            return True, "Success"
-        else:
-            return False, f"Upload failed: {response.status_code}"
-
-    def delete_file_content(self, user_id: int, file_name: str) -> bool:
-        """Delete file from both Contents API and Releases API"""
-        # Try deleting from Releases API
-        success = self.large_file_manager.delete_large_file(file_name, user_id)
-        if success:
-            return True
-        
-        # Try Contents API
-        encoded_name = urllib.parse.quote(file_name)
-        path = f"user_files/{user_id}/{encoded_name}"
-        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
-
     def get_user(self, user_id: int) -> Optional[Dict]:
         return self._get_file_content(f"data/users/{user_id}.json")
 
@@ -493,6 +218,85 @@ class GitHubDataManager:
             f"data/sessions/{user_id}.json",
             f"Delete session for user {user_id}"
         )
+
+    def download_file_content(self, user_id: int, file_name: str) -> Optional[bytes]:
+        """Download file content from GitHub"""
+        try:
+            # Try raw URL first (faster)
+            encoded_name = urllib.parse.quote(file_name)
+            raw_url = f"{self.raw_base_url}/user_files/{user_id}/{encoded_name}"
+            logger.info(f"📥 Downloading from: {raw_url}")
+            
+            response = requests.get(raw_url)
+            if response.status_code == 200:
+                logger.info(f"✅ Downloaded: {file_name} ({len(response.content)} bytes)")
+                return response.content
+            
+            # If raw fails, try API
+            path = f"user_files/{user_id}/{encoded_name}"
+            url = f"{self.base_url}/{path}"
+            logger.info(f"📥 Trying API: {url}")
+            
+            response = requests.get(url, headers=self.headers, params={"ref": self.branch})
+            if response.status_code == 200:
+                content_b64 = response.json().get("content", "")
+                if content_b64:
+                    content = base64.b64decode(content_b64)
+                    logger.info(f"✅ Downloaded via API: {file_name} ({len(content)} bytes)")
+                    return content
+            
+            logger.error(f"❌ Could not download file: {file_name}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            return None
+
+    def upload_file_content(self, file_path: str, file_name: str, user_id: int, file_size: int) -> tuple:
+        """Upload file to GitHub"""
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            
+            encoded = base64.b64encode(content).decode('utf-8')
+            encoded_name = urllib.parse.quote(file_name)
+            path = f"user_files/{user_id}/{encoded_name}"
+            url = f"{self.base_url}/{path}"
+            
+            sha = None
+            try:
+                check_response = requests.get(url, headers=self.headers)
+                if check_response.status_code == 200:
+                    sha = check_response.json().get('sha')
+            except:
+                pass
+            
+            data = {
+                "message": f"Upload {file_name} by user {user_id}",
+                "content": encoded,
+                "branch": self.branch
+            }
+            if sha:
+                data["sha"] = sha
+            
+            response = requests.put(url, headers=self.headers, json=data)
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ Uploaded: {file_name}")
+                return True, "Success"
+            else:
+                logger.error(f"❌ Upload failed: {response.text}")
+                return False, f"Upload failed: {response.status_code}"
+                
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
+            return False, str(e)
+
+    def delete_file_content(self, user_id: int, file_name: str) -> bool:
+        """Delete file from GitHub"""
+        encoded_name = urllib.parse.quote(file_name)
+        path = f"user_files/{user_id}/{encoded_name}"
+        return self._delete_file(path, f"Delete {file_name} by user {user_id}")
 
     def add_file(self, file_id: str, user_id: int, name: str, size: int, telegram_file_id: str):
         user_files = self.get_user_files(user_id)
@@ -623,6 +427,63 @@ class ProgressBar:
         
         circle = ''.join(filled_char if i < filled else empty_char for i in range(segments))
         return f"┌{'─' * segments}┐\n│{circle}│ {percentage:.1f}%\n└{'─' * segments}┘"
+
+
+# ============================================
+# LINK DOWNLOAD SUPPORT
+# ============================================
+MEDIAFIRE_RE = re.compile(r"(https?://(www\.)?mediafire\.com/\S+)")
+GDRIVE_RE = re.compile(r"(https?://(drive|docs)\.google\.com/\S+)")
+LINK_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+
+def resolve_mediafire_url(share_url: str) -> str:
+    resp = requests.get(share_url, headers=LINK_HEADERS, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    btn = soup.find(id="downloadButton")
+    if btn and btn.get("href"):
+        return btn["href"]
+
+    match = re.search(r'href="(https://download\d+\.mediafire\.com/[^"]+)"', resp.text)
+    if match:
+        return match.group(1)
+
+    raise ValueError("Couldn't find a download link on that Mediafire page.")
+
+
+def download_from_mediafire(share_url: str, dest_dir: str) -> str:
+    direct_url = resolve_mediafire_url(share_url)
+    filename = direct_url.split("/")[-1].split("?")[0]
+    dest_path = os.path.join(dest_dir, filename)
+
+    with requests.get(direct_url, headers=LINK_HEADERS, stream=True, timeout=(15, 120)) as r:
+        r.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+
+    return dest_path
+
+
+def download_from_gdrive(share_url: str, dest_dir: str) -> str:
+    import gdown
+    patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"[?&]id=([a-zA-Z0-9_-]+)", r"/d/([a-zA-Z0-9_-]+)"]
+    file_id = None
+    for p in patterns:
+        m = re.search(p, share_url)
+        if m:
+            file_id = m.group(1)
+            break
+    if not file_id:
+        raise ValueError("Couldn't extract a file ID from that Google Drive link.")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    output = gdown.download(id=file_id, output=dest_dir + "/", quiet=False)
+    if not output:
+        raise ValueError("Google Drive download failed — file may be private or restricted.")
+    return output
 
 
 # ============================================
@@ -917,10 +778,13 @@ class ArchiveBot:
             query.edit_message_text(
                 "🔗 <b>Link Download</b>\n\n"
                 "Send me a Mediafire or Google Drive link.\n\n"
-                "Supported:\n"
-                "📁 Mediafire: https://www.mediafire.com/...\n"
-                "📁 Google Drive: https://drive.google.com/...\n\n"
-                "The file will be downloaded and added to your files."
+                "📁 <b>Supported:</b>\n"
+                "• Mediafire: https://www.mediafire.com/...\n"
+                "• Google Drive: https://drive.google.com/...\n\n"
+                "The file will be downloaded and added to your files.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
+                ])
             )
             return
         
@@ -1282,16 +1146,32 @@ class ArchiveBot:
         gdrive_match = GDRIVE_RE.search(text)
 
         if mediafire_match or gdrive_match:
-            msg = update.message.reply_text("📥 Resolving link...")
+            msg = update.message.reply_text(
+                "🔗 <b>Link Detected!</b>\n\n"
+                "📥 Downloading file...\n"
+                "⏳ Please wait...",
+                parse_mode=ParseMode.HTML
+            )
+            
             local_dir = os.path.join(TEMP_DIR, f"link_{user_id}_{int(time.time())}")
             os.makedirs(local_dir, exist_ok=True)
 
             try:
                 if mediafire_match:
-                    msg.edit_text("📥 Downloading from Mediafire...")
+                    msg.edit_text(
+                        "🔗 <b>Mediafire Link Detected</b>\n\n"
+                        "📥 Downloading from Mediafire...\n"
+                        "⏳ This may take a moment.",
+                        parse_mode=ParseMode.HTML
+                    )
                     local_path = download_from_mediafire(mediafire_match.group(1), local_dir)
                 else:
-                    msg.edit_text("📥 Downloading from Google Drive...")
+                    msg.edit_text(
+                        "🔗 <b>Google Drive Link Detected</b>\n\n"
+                        "📥 Downloading from Google Drive...\n"
+                        "⏳ This may take a moment.",
+                        parse_mode=ParseMode.HTML
+                    )
                     local_path = download_from_gdrive(gdrive_match.group(1), local_dir)
             except Exception as e:
                 logger.error(f"❌ Link download failed: {e}")
@@ -1302,7 +1182,13 @@ class ArchiveBot:
             file_name = os.path.basename(local_path)
             file_size = os.path.getsize(local_path)
 
-            msg.edit_text(f"📤 Uploading {esc(file_name)} ({self.format_size(file_size)})...")
+            msg.edit_text(
+                f"📤 <b>Uploading to GitHub...</b>\n\n"
+                f"📄 {esc(file_name)}\n"
+                f"📦 {self.format_size(file_size)}\n"
+                f"⏳ Please wait...",
+                parse_mode=ParseMode.HTML
+            )
 
             success, result = self.github_data.upload_file_content(local_path, file_name, user_id, file_size)
             shutil.rmtree(local_dir, ignore_errors=True)
@@ -1314,11 +1200,15 @@ class ArchiveBot:
             unique_id = secrets.token_hex(16)
             self.github_data.add_file(unique_id, user_id, file_name, file_size, "")
 
+            # Show file with download button
             msg.edit_text(
-                f"✅ <b>File ready!</b>\n\n"
-                f"📄 {esc(file_name)} ({self.format_size(file_size)})\n\n"
-                f"Go to <b>My Files</b> to compress, extract, or rename it.",
+                f"✅ <b>File Ready!</b>\n\n"
+                f"📄 {esc(file_name)}\n"
+                f"📦 {self.format_size(file_size)}\n"
+                f"🔒 Stored on GitHub\n\n"
+                f"<b>What would you like to do?</b>",
                 reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📥 Download File", callback_data=f"download_{unique_id}")],
                     [InlineKeyboardButton("📂 My Files", callback_data="my_files")],
                     [InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]
                 ]),
@@ -1355,7 +1245,7 @@ class ArchiveBot:
             return
         
         # ============================================
-        # RENAME - Download from GitHub, Rename, Send, Delete
+        # RENAME
         # ============================================
         if session and session.get('step') == 'waiting_rename':
             file_id = session.get('rename_file_id')
@@ -1381,7 +1271,6 @@ class ArchiveBot:
                 content = self.github_data.download_file_content(user_id, old_name)
                 
                 if content is None:
-                    logger.error(f"❌ Could not download file from GitHub")
                     msg.edit_text(f"❌ Could not download file from GitHub")
                     self.clear_session(user_id)
                     return
@@ -1528,7 +1417,7 @@ class ArchiveBot:
         self.file_handler(update, context)
 
     # ============================================
-    # EXTRACT AND SEND - DELETE AFTER SEND
+    # EXTRACT AND SEND
     # ============================================
     def extract_and_send(self, update, context, user_id, file_data):
         query = update.callback_query
@@ -1539,7 +1428,6 @@ class ArchiveBot:
         content_bytes = self.github_data.download_file_content(user_id, file_name)
         
         if content_bytes is None:
-            logger.error(f"❌ Could not download file from GitHub")
             query.edit_message_text(f"❌ Could not download file from GitHub")
             return
         
@@ -1640,9 +1528,6 @@ class ArchiveBot:
         self.github_data.delete_file_content(user_id, file_name)
         self.github_data.delete_user_file(user_id, file_data['id'])
 
-    # ============================================
-    # EXTRACT SINGLE FILE
-    # ============================================
     def extract_file(self, update, context, user_id, file_id):
         file_data = self.github_data.get_file(user_id, file_id)
         if not file_data:
@@ -1650,9 +1535,6 @@ class ArchiveBot:
             return
         self.extract_and_send(update, context, user_id, file_data)
 
-    # ============================================
-    # EXTRACT ALL FILES
-    # ============================================
     def extract_all_files(self, update, context, user_id):
         query = update.callback_query
         files = self.github_data.get_user_files(user_id)
@@ -1667,7 +1549,7 @@ class ArchiveBot:
         query.edit_message_text("✅ All files extracted!")
 
     # ============================================
-    # COMPRESS AND SEND - DELETE AFTER SEND
+    # COMPRESS AND SEND
     # ============================================
     def compress_and_send(self, update, context, user_id, file_data, format_type):
         query = update.callback_query
@@ -1678,7 +1560,6 @@ class ArchiveBot:
         content_bytes = self.github_data.download_file_content(user_id, file_name)
         
         if content_bytes is None:
-            logger.error(f"❌ Could not download file from GitHub")
             query.edit_message_text(f"❌ Could not download file from GitHub")
             return
         
@@ -1695,10 +1576,17 @@ class ArchiveBot:
         try:
             if format_type == 'zip':
                 if password:
-                    import pyzipper
-                    with pyzipper.AESZipFile(archive_path, 'w', compression=pyzipper.ZIP_LZMA, encryption=pyzipper.WZ_AES) as zipf:
-                        zipf.setpassword(password.encode())
-                        zipf.write(temp_path, os.path.basename(file_name))
+                    try:
+                        import pyzipper
+                        with pyzipper.AESZipFile(archive_path, 'w', compression=pyzipper.ZIP_LZMA, encryption=pyzipper.WZ_AES) as zipf:
+                            zipf.setpassword(password.encode())
+                            zipf.write(temp_path, os.path.basename(file_name))
+                    except:
+                        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            if password:
+                                # Note: stdlib zipfile doesn't support encryption
+                                pass
+                            zipf.write(temp_path, os.path.basename(file_name))
                 else:
                     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         zipf.write(temp_path, os.path.basename(file_name))
@@ -1734,9 +1622,6 @@ class ArchiveBot:
         self.github_data.delete_file_content(user_id, file_name)
         self.github_data.delete_user_file(user_id, file_data['id'])
 
-    # ============================================
-    # COMPRESS SINGLE WITH FORMAT
-    # ============================================
     def compress_single_with_format(self, update, context, user_id, file_id, format_type):
         file_data = self.github_data.get_file(user_id, file_id)
         if not file_data:
@@ -1744,9 +1629,6 @@ class ArchiveBot:
             return
         self.compress_and_send(update, context, user_id, file_data, format_type)
 
-    # ============================================
-    # COMPRESS SINGLE FILE
-    # ============================================
     def compress_file(self, update, context, user_id, file_id):
         query = update.callback_query
         file_data = self.github_data.get_file(user_id, file_id)
@@ -1767,9 +1649,6 @@ class ArchiveBot:
             parse_mode=ParseMode.HTML
         )
 
-    # ============================================
-    # COMPRESS ALL WITH FORMAT
-    # ============================================
     def compress_all_with_format(self, update, context, user_id, format_type):
         query = update.callback_query
         files = self.github_data.get_user_files(user_id)
@@ -1783,9 +1662,6 @@ class ArchiveBot:
         
         query.edit_message_text("✅ All files compressed!")
 
-    # ============================================
-    # COMPRESS ALL FILES
-    # ============================================
     def compress_all_files(self, update, context, user_id):
         query = update.callback_query
         
@@ -1802,13 +1678,52 @@ class ArchiveBot:
         )
 
     # ============================================
+    # DOWNLOAD FILE HANDLER
+    # ============================================
+    def download_file_handler(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        user_id = self.get_user_id(update)
+        if not user_id:
+            return
+        
+        data = query.data
+        if data.startswith("download_"):
+            file_id = data.replace("download_", "")
+            file_data = self.github_data.get_file(user_id, file_id)
+            
+            if not file_data:
+                query.edit_message_text("❌ File not found")
+                return
+            
+            query.edit_message_text(f"📥 Downloading {esc(file_data['name'])}...")
+            
+            content = self.github_data.download_file_content(user_id, file_data['name'])
+            
+            if content is None:
+                query.edit_message_text("❌ Could not download file")
+                return
+            
+            temp_path = os.path.join(TEMP_DIR, f"{user_id}_{file_data['name']}")
+            with open(temp_path, 'wb') as f:
+                f.write(content)
+            
+            with open(temp_path, 'rb') as doc:
+                context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=doc,
+                    filename=file_data['name']
+                )
+            
+            os.remove(temp_path)
+            query.edit_message_text("✅ File sent!")
+
+    # ============================================
     # RUN BOT
     # ============================================
     def run(self):
         logger.info('🚀 Starting Archive Bot...')
         logger.info(f'📁 Data stored in: {GITHUB_OWNER}/{GITHUB_REPO}')
         logger.info(f'📦 Max file size: {self.format_size(MAX_FILE_SIZE)}')
-        logger.info(f'📦 GitHub API limit: {self.format_size(GITHUB_API_LIMIT)}')
         logger.info('🔗 Link support: Mediafire, Google Drive')
         
         try:
@@ -1836,6 +1751,7 @@ class ArchiveBot:
             dp.add_handler(MessageHandler(Filters.photo, self.photo_handler))
             dp.add_handler(MessageHandler(Filters.text & ~Filters.command, self.text_handler))
             dp.add_handler(CallbackQueryHandler(self.callback_handler))
+            dp.add_handler(CallbackQueryHandler(self.download_file_handler, pattern=r'^download_'))
             
             logger.info('✅ Bot ready!')
             updater.start_polling()
